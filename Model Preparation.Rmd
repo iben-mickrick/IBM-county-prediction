@@ -1,0 +1,1908 @@
+---
+title: "County Model Preparation"
+author: "Iben M. Ricket"
+date: "8/11/2020"
+output:
+  html_document:
+    toc: true
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# County Model Preparation 
+
+This code below performs the following:
+
+1. Groups candidate features from all 4 domains into one data file, for each outcome metric
+2. Conducts interaction investigation using random forest 
+3. Ungroups candidate features + relevant second order terms into 4 distinct domains 
+4. Performs 2 feature selection techniques, including LASSO and random forest 
+4a. The random forest feature selection occurs concurrent with the interaction identification 
+5. Saves the coefficient output and variable importance output 
+
+Install necessary libraries
+```{r message=FALSE, warning=FALSE}
+library(healthcareai)
+library(dplyr)
+library(glmnet)
+library(pROC)
+library(caret)
+library(ROCR)
+library(generalhoslem)
+library(ResourceSelection)
+library(PredictABEL)
+library(ROCR)
+library(SDMTools)
+library(randomForest)
+library(arsenal)
+library(sqldf)
+library(tidyverse)
+library(tableone)
+library(iml)
+```
+
+A license is needed to obtain some data used in this study. As such, data from this project cannot be made publicly available. A statement of data loading is not present below. 
+
+## Candidate Exposure Domain/Groupings Re-Grouping  
+
+This study defines four unique candidate exposure domains/groupings, however, for the purpose of data cleaning, wrangling, and preliminary analysis, I have left data ungrouped. Moving forward, I will group the following data sources to align with the four candidate exposure domains/groupings: (1) adult and child disease and health status--this will serve collectively as the disease and health status candidate exposure domain, (2) employment and housing characteristics---this will serve collectively as the community characteristics candidate exposure domain, and (3) food, household and miscellaneous consumer expenditures---this will collectively serve as the consumer expenditures candidate exposure domain. The fourth and final domain/grouping is demographics, which requires no merging of data. 
+
+Note, that the groupings will occur for each unique outcome. 
+
+Adult & child disease/health status grouping for ER visits 
+```{r}
+DxHealthER<-merge(AdultDxER_1215, ChildDxER_1215, by="All_Counties")
+#drop extra outcome variable generated in the merge 
+DxHealthER<-DxHealthER[-c(103)]
+#rename outcome
+names(DxHealthER)[names(DxHealthER)=="TotER17Capita.y"] <- "TotER17Capita"
+```
+
+Adult & child disease/health status grouping for IP days 
+```{r}
+DxHealthIP<-merge(AdultDxIP_1215, ChildDxIP_1215, by="All_Counties")
+#drop extra outcome variable generated in the merge 
+DxHealthIP<-DxHealthIP[-c(103)]
+#rename outcome
+names(DxHealthIP)[names(DxHealthIP)=="InpDay17Capita.y"] <- "InpDay17Capita"
+```
+
+Adult & child disease/health status grouping for hospital expenditures 
+```{r}
+DxHealthExp<-merge(AdultDxExp_1215, ChildDxExp_1215, by="All_Counties")
+#drop extra outcome variable generated in the merge 
+DxHealthExp<-DxHealthExp[-c(103)]
+#rename outcome
+names(DxHealthExp)[names(DxHealthExp)=="HosExpCapita.y"] <- "HosExpCapita"
+```
+
+Employment and housing characteristics for ER visits 
+```{r}
+CommER<-merge(EmployER_1215, HousingER_1215, by="All_Counties")
+#drop extra outcome variable generated in the merge 
+CommER<-CommER[-c(69)]
+#rename outcome
+names(CommER)[names(CommER)=="TotER17Capita.y"] <- "TotER17Capita"
+```
+
+Employment and housing characteristics for IP days 
+```{r}
+CommIP<-merge(EmployIP_1215, HousingIP_1215, by="All_Counties")
+#drop extra outcome variable generated in the merge 
+CommIP<-CommIP[-c(69)]
+#rename outcome
+names(CommIP)[names(CommIP)=="InpDay17Capita.y"] <- "InpDay17Capita"
+```
+
+Employment and housing characteristics for hospital expenditures 
+```{r}
+CommExp<-merge(EmployExp_1215, HousingExp_1215, by="All_Counties")
+#drop extra outcome variable generated in the merge 
+CommExp<-CommExp[-c(69)]
+#rename outcome
+names(CommExp)[names(CommExp)=="HosExpCapita.y"] <- "HosExpCapita"
+```
+
+Food, household, and miscellaneous expenditures and ER visits 
+```{r}
+ConsER <- merge(FoodER_1215, HomeER_1215) %>%
+              merge(MiscER_1215)
+```
+
+Food, household, and miscellaneous expenditures and IP days 
+```{r}
+ConsIP<-merge(FoodIP_1215, HomeIP_1215) %>%
+              merge(MiscIP_1215)
+```
+
+Food, household, and miscellaneous expenditures and hospital expenditures  
+```{r}
+ConsExp<-merge(FoodExp_1215, HomeExp_1215) %>%
+              merge(MiscExp_1215)
+```
+
+
+## Second Order Terms
+Parametric models do not account/test for possible second order terms. As such, second order terms will be derived and these, in addition to the main effects will be fed into LASSO models for feature selection. No second order terms are needed for random forest, since it can model non-linearity without them. 
+
+###Demographics
+
+ER Visits 
+```{r}
+set.seed(70119)
+#create training and test 
+d_rf1 <- split_train_test(d = Demo1ER_1215[-1], outcome = TotER17Capita)
+train_set_rf1 <- d_rf1$train
+test_set_rf1 <- d_rf1$test
+```
+
+Random Forest Model 
+```{r}
+(rf.model1_rf <- randomForest(TotER17Capita ~., data= train_set_rf1, importance=TRUE))
+#variables 
+(ER_Demo_Var<-importance(rf.model1_rf))
+#feature importance 
+X_ER<-train_set_rf1[which(names(train_set_rf1) != "TotER17Capita")]
+#Predictor container 
+Predictor_ER<-Predictor$new(rf.model1_rf, data=X_ER, y=train_set_rf1$TotER17Capita)
+#Interactions --identify the variable with the largest interaction strength 
+Interact_ER<-Interaction$new(Predictor_ER)
+head(Interact_ER$results)
+Interact_ER$results
+#The maximum interaction value is 0.14057 and it is associated with OTFamFemaleHHer_No_Husband_PresentNumFam, this variable will be used to generate all possible pairwise interactions
+Interactions_ER<-Interaction$new(Predictor_ER, feature="OTFamFemaleHHer_No_Husband_PresentNumFam")
+#minimum interaction value was 0.0 and the maximum was 0.071430, which corresponds to EduAtt_Pro_DegreePop25UpNumPersons:OTFamFemaleHHer_No_Husband_PresentNumFam
+summary(Interactions_ER$results)
+Interactions_ER$results
+Interactions_ER_List<-Interactions_ER$results[Interactions_ER$results$.interaction>quantile(Interactions_ER$results$.interaction, 0.90),]
+Interactions_ER_List
+```
+
+Demographic pairwise interactions for ER visits per capita to include in LASSO feature selection will include those in the top 10th percentile for interaction strength. 
+
+Look at range of importance values 
+```{r}
+ER_Demo_Var<-as.data.frame(ER_Demo_Var)
+summary(ER_Demo_Var$IncNodePurity)
+summary(ER_Demo_Var$`%IncMSE`)
+```
+
+Subset variables if their prediction error (based on MSE) is 
+```{r}
+ER_Demo_Var_10.07<-ER_Demo_Var[ER_Demo_Var$`%IncMSE` > quantile(ER_Demo_Var$`%IncMSE`, 0.90), ]
+```
+
+Repeat for IP
+```{r}
+set.seed(70119)
+d_rf1 <- split_train_test(d = Demo1IP_1215[-1], outcome = InpDay17Capita)
+train_set_rf1 <- d_rf1$train
+test_set_rf1 <- d_rf1$test
+```
+
+Random Forest Model 
+```{r}
+(rf.model1_rf <- randomForest(InpDay17Capita ~., data= train_set_rf1, importance=TRUE))
+#variables 
+(IP_Demo_Var<-importance(rf.model1_rf))
+#feature importance 
+X_IP<-train_set_rf1[which(names(train_set_rf1) != "InpDay17Capita")]
+#Predictor container 
+Predictor_IP<-Predictor$new(rf.model1_rf, data=X_IP, y=train_set_rf1$InpDay17Capita)
+#Interactions --identify the variable with the largest interaction strength 
+Interact_IP<-Interaction$new(Predictor_IP)
+head(Interact_IP$results)
+#0.10968 is the max value associated with HHIncome_Per_Capita_DolAmt
+summary(Interact_IP$results)
+Interact_IP$results
+#The maximum interaction value
+Interactions_IP<-Interaction$new(Predictor_IP, feature="HHIncome_Per_Capita_DolAmt")
+#minimum interaction value was 0.0 and the maximum was 0.09985
+summary(Interactions_IP$results)
+Interactions_IP_List<-Interactions_IP$results[Interactions_IP$results$.interaction>quantile(Interactions_IP$results$.interaction, 0.90),]
+Interactions_IP_List
+```
+
+Look at range of importance values 
+```{r}
+IP_Demo_Var<-as.data.frame(IP_Demo_Var)
+summary(IP_Demo_Var$IncNodePurity)
+summary(IP_Demo_Var$`%IncMSE`)
+```
+
+Subset variables if their prediction error (based on MSE) is 
+```{r}
+IP_Demo_Var_10.07<-IP_Demo_Var[IP_Demo_Var$`%IncMSE` > quantile(IP_Demo_Var$`%IncMSE`, 0.90), ]
+```
+
+Repeat for hospital expenditures 
+```{r}
+set.seed(70119)
+d_rf1 <- split_train_test(d = Demo1Exp_1215[-1], outcome = HosExpCapita)
+train_set_rf1 <- d_rf1$train
+test_set_rf1 <- d_rf1$test
+```
+
+Random Forest Model 
+```{r}
+(rf.model1_rf <- randomForest(HosExpCapita ~., data= train_set_rf1, importance=TRUE))
+#variables 
+(HosExp_Demo_Var<-importance(rf.model1_rf))
+#feature importance 
+X_Hos<-train_set_rf1[which(names(train_set_rf1) != "HosExpCapita")]
+#Predictor container 
+Predictor_Hos<-Predictor$new(rf.model1_rf, data=X_Hos, y=train_set_rf1$HosExpCapita)
+#Interactions --identify the variable with the largest interaction strength 
+Interact_Hos<-Interaction$new(Predictor_Hos)
+head(Interact_Hos$results)
+summary(Interact_Hos$results)
+Interact_Hos$results
+#The maximum interaction value is 0.200726 and is NonFamAged_Under_25_YearsNumHHs
+Interactions_Hos<-Interaction$new(Predictor_Hos, feature="NonFamAged_Under_25_YearsNumHHs")
+#minimum interaction value was 0.0 and the maximum was 0.156786
+summary(Interactions_Hos$results)
+Interactions_Hos_List<-Interactions_Hos$results[Interactions_Hos$results$.interaction>quantile(Interactions_Hos$results$.interaction, 0.90),]
+Interactions_Hos_List
+```
+
+Look at range of importance values 
+```{r}
+HosExp_Demo_Var<-as.data.frame(HosExp_Demo_Var)
+summary(HosExp_Demo_Var$IncNodePurity)
+summary(HosExp_Demo_Var$`%IncMSE`)
+```
+
+Subset variables if their prediction error (based on MSE) is 
+```{r}
+HosExp_Demo_Var_10.07<-HosExp_Demo_Var[HosExp_Demo_Var$`%IncMSE` > quantile(HosExp_Demo_Var$`%IncMSE`, 0.90), ]
+```
+
+###Adult & child disease and health status
+
+ER Visits
+```{r}
+set.seed(70119)
+#create training and test 
+d_rf1 <- split_train_test(d = DxHealthER_1215[-c(1)], outcome = TotER17Capita)
+train_set_rf1 <- d_rf1$train
+test_set_rf1 <- d_rf1$test
+```
+
+Random Forest Model 
+```{r}
+(rf.model1_rf <- randomForest(TotER17Capita ~., data= train_set_rf1, importance=TRUE))
+#variables 
+(ER_Adult_Var<-importance(rf.model1_rf))
+#feature importance 
+X_ERdx<-train_set_rf1[which(names(train_set_rf1) != "TotER17Capita")]
+#Predictor container 
+Predictor_ERdx<-Predictor$new(rf.model1_rf, data=X_ERdx, y=train_set_rf1$TotER17Capita)
+#Interactions --identify the variable with the largest interaction strength 
+Interact_ERdx<-Interaction$new(Predictor_ERdx)
+head(Interact_ERdx$results)
+summary(Interact_ERdx$results)
+#The maximum interaction value is 0.323563 and it was Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+Interact_ERdx$results
+Interactions_ERdx<-Interaction$new(Predictor_ERdx, feature="Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons")
+#minimum interaction value was 0.0 and max was 0.175661
+summary(Interactions_ERdx$results)
+Interactions_ERdx_List<-Interactions_ERdx$results[Interactions_ERdx$results$.interaction>quantile(Interactions_ERdx$results$.interaction, 0.90),]
+Interactions_ERdx_List
+```
+
+Look at range of importance values 
+```{r}
+ER_Adult_Var<-as.data.frame(ER_Adult_Var)
+summary(ER_Adult_Var$IncNodePurity)
+summary(ER_Adult_Var$`%IncMSE`)
+```
+
+Subset variables if their prediction error (based on MSE) is 
+```{r}
+ER_Adult_Var_10.07<-ER_Adult_Var[ER_Adult_Var$`%IncMSE` > quantile(ER_Adult_Var$`%IncMSE`, 0.90), ]
+```
+
+Repeat for IP visits 
+```{r}
+set.seed(70119)
+d_rf1 <- split_train_test(d = DxHealthIP_1215[-1], outcome = InpDay17Capita)
+train_set_rf1 <- d_rf1$train
+test_set_rf1 <- d_rf1$test
+```
+
+Random Forest Model 
+```{r}
+(rf.model1_rf <- randomForest(InpDay17Capita ~., data= train_set_rf1, importance=TRUE))
+#variables 
+(IP_Adult_Var<-importance(rf.model1_rf))
+#feature importance 
+X_IPdx<-train_set_rf1[which(names(train_set_rf1) != "InpDay17Capita")]
+#Predictor container 
+Predictor_IPdx<-Predictor$new(rf.model1_rf, data=X_IPdx, y=train_set_rf1$InpDay17Capita)
+#Interactions --identify the variable with the largest interaction strength 
+Interact_IPdx<-Interaction$new(Predictor_IPdx)
+head(Interact_IPdx$results)
+summary(Interact_IPdx$results)
+#The maximum interaction value was 0.286457 Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+Interact_IPdx$results
+Interactions_IPdx<-Interaction$new(Predictor_IPdx, feature="Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons")
+#minimum interaction value was 0.0 and the maximum was 0.099036
+summary(Interactions_IPdx$results)
+Interactions_IPdx_List<-Interactions_IPdx$results[Interactions_IPdx$results$.interaction>quantile(Interactions_IPdx$results$.interaction, 0.90),]
+Interactions_IPdx_List
+```
+
+Look at range of importance values 
+```{r}
+IP_Adult_Var<-as.data.frame(IP_Adult_Var)
+summary(IP_Adult_Var$IncNodePurity)
+summary(IP_Adult_Var$`%IncMSE`)
+```
+
+Subset variables if their prediction error (based on MSE) is 
+```{r}
+IP_Adult_Var_10.07<-IP_Adult_Var[IP_Adult_Var$`%IncMSE` > quantile(IP_Adult_Var$`%IncMSE`, 0.90), ]
+```
+
+Repeat for hospital expenditures 
+```{r}
+set.seed(70119)
+#create training and test 
+d_rf1 <- split_train_test(d = DxHealthExp_1215[-1], outcome = HosExpCapita)
+train_set_rf1 <- d_rf1$train
+test_set_rf1 <- d_rf1$test
+```
+
+Random Forest Model 
+```{r}
+(rf.model1_rf <- randomForest(HosExpCapita ~., data= train_set_rf1, importance=TRUE))
+#variables 
+(HosExp_Adult_Var<-importance(rf.model1_rf))
+#feature importance 
+X_Hosdx<-train_set_rf1[which(names(train_set_rf1) != "HosExpCapita")]
+#Predictor container 
+Predictor_Hosdx<-Predictor$new(rf.model1_rf, data=X_Hosdx, y=train_set_rf1$HosExpCapita)
+#Interactions --identify the variable with the largest interaction strength 
+Interact_Hosdx<-Interaction$new(Predictor_Hosdx)
+head(Interact_Hosdx$results)
+summary(Interact_Hosdx$results)
+#The maximum interaction value 0.254430 Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+Interact_Hosdx$results
+Interactions_Hosdx<-Interaction$new(Predictor_Hosdx, feature="Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons")
+#minimum interaction value was 0.0 and the maximum was 0.065633
+summary(Interactions_Hosdx$results)
+Interactions_Hosdx_List<-Interactions_Hosdx$results[Interactions_Hosdx$results$.interaction>quantile(Interactions_Hosdx$results$.interaction, 0.90),]
+Interactions_Hosdx_List
+```
+
+Look at range of importance values 
+```{r}
+HosExp_Adult_Var<-as.data.frame(HosExp_Adult_Var)
+summary(HosExp_Adult_Var$IncNodePurity)
+summary(HosExp_Adult_Var$`%IncMSE`)
+```
+
+Subset variables if their prediction error (based on MSE) is 
+```{r}
+HosExp_Adult_Var_10.07<-HosExp_Adult_Var[HosExp_Adult_Var$`%IncMSE` > quantile(HosExp_Adult_Var$`%IncMSE`, 0.90), ]
+```
+
+###Community Factors
+
+ER Visits 
+```{r}
+set.seed(70119)
+#create training and test 
+d_rf1 <- split_train_test(d = CommER_1215[-1], outcome = TotER17Capita)
+train_set_rf1 <- d_rf1$train
+test_set_rf1 <- d_rf1$test
+```
+
+Random Forest Model 
+```{r}
+(rf.model1_rf <- randomForest(TotER17Capita ~., data= train_set_rf1, importance=TRUE))
+#variables 
+(ER_Employ_Var<-importance(rf.model1_rf))
+#feature importance 
+X_ERComm<-train_set_rf1[which(names(train_set_rf1) != "TotER17Capita")]
+#Predictor container 
+Predictor_ERComm<-Predictor$new(rf.model1_rf, data=X_ERComm, y=train_set_rf1$TotER17Capita)
+#Interactions --identify the variable with the largest interaction strength 
+Interact_ERComm<-Interaction$new(Predictor_ERComm)
+head(Interact_ERComm$results)
+summary(Interact_ERComm$results)
+#The maximum interaction value is 0.181617 and it was Hou_Renter_Occupied
+Interact_ERComm$results
+Interactions_ERComm<-Interaction$new(Predictor_ERComm, feature="Hou_Renter_Occupied")
+#minimum interaction value was 0.0 and max was 0.196534
+summary(Interactions_ERComm$results)
+Interactions_ERComm_List<-Interactions_ERComm$results[Interactions_ERComm$results$.interaction>quantile(Interactions_ERComm$results$.interaction, 0.90),]
+Interactions_ERComm_List
+```
+
+Look at range of importance values 
+```{r}
+ER_Employ_Var<-as.data.frame(ER_Employ_Var)
+summary(ER_Employ_Var$IncNodePurity)
+summary(ER_Employ_Var$`%IncMSE`)
+```
+
+Subset variables if their prediction error (based on MSE) is 
+```{r}
+ER_Employ_Var_10.07<-ER_Employ_Var[ER_Employ_Var$`%IncMSE` > quantile(ER_Employ_Var$`%IncMSE`, 0.90), ]
+```
+
+IP days 
+```{r}
+set.seed(70119)
+#create training and test
+d_rf1 <- split_train_test(d = CommIP_1215[-c(1)], outcome = InpDay17Capita)
+train_set_rf1 <- d_rf1$train
+test_set_rf1 <- d_rf1$test
+```
+
+Random Forest Model 
+```{r}
+(rf.model1_rf <- randomForest(InpDay17Capita ~., data= train_set_rf1, importance=TRUE))
+#variables 
+(IP_Employ_Var<-importance(rf.model1_rf))
+#feature importance 
+X_IPComm<-train_set_rf1[which(names(train_set_rf1) != "InpDay17Capita")]
+#Predictor container 
+Predictor_IPComm<-Predictor$new(rf.model1_rf, data=X_IPComm, y=train_set_rf1$InpDay17Capita)
+#Interactions --identify the variable with the largest interaction strength 
+Interact_IPComm<-Interaction$new(Predictor_IPComm)
+head(Interact_IPComm$results)
+summary(Interact_IPComm$results)
+#The maximum interaction value was 0.241921 Emp_Health_Care_and_Social_Assistance_.Per
+Interact_IPComm$results
+Interactions_IPComm<-Interaction$new(Predictor_IPComm, feature="Emp_Health_Care_and_Social_Assistance_.Per")
+#minimum interaction value was 0.0 and the maximum was .1876963 
+summary(Interactions_IPComm$results)
+Interactions_IPComm_List<-Interactions_IPComm$results[Interactions_IPComm$results$.interaction>quantile(Interactions_IPComm$results$.interaction, 0.90),]
+Interactions_IPComm_List
+```
+
+Look at range of importance values 
+```{r}
+IP_Employ_Var<-as.data.frame(IP_Employ_Var)
+summary(IP_Employ_Var$IncNodePurity)
+summary(IP_Employ_Var$`%IncMSE`)
+```
+
+Subset variables if their prediction error (based on MSE) is 
+```{r}
+IP_Employ_Var_10.07<-IP_Employ_Var[IP_Employ_Var$`%IncMSE` > quantile(IP_Employ_Var$`%IncMSE`, 0.90), ]
+```
+
+Hospital Expenditures 
+```{r}
+set.seed(70119)
+#create training and test 
+d_rf1 <- split_train_test(d = CommExp_1215[-c(1)], outcome = HosExpCapita)
+train_set_rf1 <- d_rf1$train
+test_set_rf1 <- d_rf1$test
+```
+
+Random Forest Model 
+```{r}
+(rf.model1_rf <- randomForest(HosExpCapita ~., data= train_set_rf1, importance=TRUE))
+#variables 
+(HosExp_Employ_Var<-importance(rf.model1_rf))
+#feature importance 
+X_HosComm<-train_set_rf1[which(names(train_set_rf1) != "HosExpCapita")]
+#Predictor container 
+Predictor_HosComm<-Predictor$new(rf.model1_rf, data=X_HosComm, y=train_set_rf1$HosExpCapita)
+#Interactions --identify the variable with the largest interaction strength 
+Interact_HosComm<-Interaction$new(Predictor_HosComm)
+head(Interact_HosComm$results)
+summary(Interact_HosComm$results)
+#The maximum interaction value 0.2182675 associated with Emp_Travel_Time_30.59_Min_.Per
+Interact_HosComm$results
+Interactions_HosComm<-Interaction$new(Predictor_HosComm, feature="Emp_Travel_Time_30.59_Min_.Per")
+#minimum interaction value was 0.0 and the maximum was 0.1482238
+summary(Interactions_HosComm$results)
+Interactions_HosComm_List<-Interactions_HosComm$results[Interactions_HosComm$results$.interaction>quantile(Interactions_HosComm$results$.interaction, 0.90),]
+Interactions_HosComm_List
+```
+
+Look at range of importance values 
+```{r}
+HosExp_Employ_Var<-as.data.frame(HosExp_Employ_Var)
+summary(HosExp_Employ_Var$IncNodePurity)
+summary(HosExp_Employ_Var$`%IncMSE`)
+```
+
+Subset variables if their prediction error (based on MSE) is 
+```{r}
+HosExp_Employ_Var_10.07<-HosExp_Employ_Var[HosExp_Employ_Var$`%IncMSE` > quantile(HosExp_Employ_Var$`%IncMSE`, 0.90), ]
+```
+
+###Consumer purchases 
+ER Visits 
+```{r}
+set.seed(70119)
+#create training and test 
+d_rf1 <- split_train_test(d = ConsER_1215[-1], outcome = TotER17Capita)
+train_set_rf1 <- d_rf1$train
+test_set_rf1 <- d_rf1$test
+```
+
+Random Forest Model 
+```{r}
+(rf.model1_rf <- randomForest(TotER17Capita ~., data= train_set_rf1, importance=TRUE))
+#variables 
+(ER_Food_Var<-importance(rf.model1_rf))
+#feature importance 
+X_ERCons<-train_set_rf1[which(names(train_set_rf1) != "TotER17Capita")]
+#Predictor container 
+Predictor_ERCons<-Predictor$new(rf.model1_rf, data=X_ERCons, y=train_set_rf1$TotER17Capita)
+#Interactions --identify the variable with the largest interaction strength 
+Interact_ERCons<-Interaction$new(Predictor_ERCons)
+head(Interact_ERCons$results)
+summary(Interact_ERCons$results)
+#The maximum interaction value is 0.1767750 Rent_as_pay_TotAmt
+Interact_ERCons$results
+Interactions_ERCons<-Interaction$new(Predictor_ERCons, feature="Rent_as_pay_TotAmt")
+#minimum interaction value was 0.0 and max was 0.0959000
+summary(Interactions_ERCons$results)
+Interactions_ERCons_List<-Interactions_ERCons$results[Interactions_ERCons$results$.interaction>quantile(Interactions_ERCons$results$.interaction, 0.90),]
+Interactions_ERCons_List
+```
+
+Look at range of importance values 
+```{r}
+ER_Food_Var<-as.data.frame(ER_Food_Var)
+summary(ER_Food_Var$IncNodePurity)
+summary(ER_Food_Var$`%IncMSE`)
+```
+
+Subset variables if their prediction error (based on MSE) is 
+```{r}
+ER_Food_Var_10.07<-ER_Food_Var[ER_Food_Var$`%IncMSE` > quantile(ER_Food_Var$`%IncMSE`, 0.90), ]
+```
+
+IP Days 
+```{r}
+set.seed(70119)
+#create training and test 
+d_rf1 <- split_train_test(d = ConsIP_1215[-1], outcome = InpDay17Capita)
+train_set_rf1 <- d_rf1$train
+test_set_rf1 <- d_rf1$test
+```
+
+Random Forest Model 
+```{r}
+(rf.model1_rf <- randomForest(InpDay17Capita ~., data= train_set_rf1, importance=TRUE))
+#variables 
+(IP_Food_Var<-importance(rf.model1_rf))
+#feature importance 
+X_IPCons<-train_set_rf1[which(names(train_set_rf1) != "InpDay17Capita")]
+#Predictor container 
+Predictor_IPCons<-Predictor$new(rf.model1_rf, data=X_IPCons, y=train_set_rf1$InpDay17Capita)
+#Interactions --identify the variable with the largest interaction strength 
+Interact_IPCons<-Interaction$new(Predictor_IPCons)
+head(Interact_IPCons$results)
+summary(Interact_IPCons$results)
+#The maximum interaction value was 0.1813030 Rent_TotAmt
+Interact_IPCons$results
+Interactions_IPCons<-Interaction$new(Predictor_IPCons, feature="Rent_TotAmt")
+#minimum interaction value was 0.0 and the maximum was 0.1889173
+summary(Interactions_IPCons$results)
+Interactions_IPCons_List<-Interactions_IPCons$results[Interactions_IPCons$results$.interaction>quantile(Interactions_IPCons$results$.interaction, 0.90),]
+Interactions_IPCons_List
+```
+
+Look at range of importance values 
+```{r}
+IP_Food_Var<-as.data.frame(IP_Food_Var)
+summary(IP_Food_Var$IncNodePurity)
+summary(IP_Food_Var$`%IncMSE`)
+```
+
+Subset variables if their prediction error (based on MSE) is 
+```{r}
+IP_Food_Var_10.07<-IP_Food_Var[IP_Food_Var$`%IncMSE` > quantile(IP_Food_Var$`%IncMSE`, 0.90), ]
+```
+
+Hospital Expenditures 
+```{r}
+set.seed(70119)
+#create training and test
+d_rf1 <- split_train_test(d = ConsExp_1215[-1], outcome = HosExpCapita)
+train_set_rf1 <- d_rf1$train
+test_set_rf1 <- d_rf1$test
+```
+
+Random Forest Model 
+```{r}
+(rf.model1_rf <- randomForest(HosExpCapita ~., data= train_set_rf1, importance=TRUE))
+#variables 
+(HosExp_Food_Var<-importance(rf.model1_rf))
+X_HosCons<-train_set_rf1[which(names(train_set_rf1) != "HosExpCapita")]
+#Predictor container 
+Predictor_HosCons<-Predictor$new(rf.model1_rf, data=X_HosCons, y=train_set_rf1$HosExpCapita)
+#Interactions --identify the variable with the largest interaction strength 
+Interact_HosCons<-Interaction$new(Predictor_HosCons)
+head(Interact_HosCons$results)
+summary(Interact_HosCons$results)
+#The maximum interaction value 0.1885014 Tenants_insurance_TotAmt
+Interact_HosCons$results
+Interactions_HosCons<-Interaction$new(Predictor_HosCons, feature="Tenants_insurance_TotAmt")
+#minimum interaction value was 0.0 and the maximum was 0.1653761
+summary(Interactions_HosCons$results)
+Interactions_HosCons_List<-Interactions_HosCons$results[Interactions_HosCons$results$.interaction>quantile(Interactions_HosCons$results$.interaction, 0.90),]
+Interactions_HosCons_List
+```
+
+Look at range of importance values 
+```{r}
+HosExp_Food_Var<-as.data.frame(HosExp_Food_Var)
+summary(HosExp_Food_Var$IncNodePurity)
+summary(HosExp_Food_Var$`%IncMSE`)
+```
+
+Subset variables if their prediction error (based on MSE) is 
+```{r}
+HosExp_Food_Var_10.07<-HosExp_Food_Var[HosExp_Food_Var$`%IncMSE` > quantile(HosExp_Food_Var$`%IncMSE`, 0.90), ]
+```
+
+Save Variable Outputs
+Full path is masked but will align with other code dependencies 
+```{r}
+save(ER_Demo_Var_10.07, file="~/County/Model/ER_Demo_Var_10.07.Rda")
+save(IP_Demo_Var_10.07, file="~/County/Model/IP_Demo_Var_10.07.Rda")
+save(HosExp_Demo_Var_10.07, file="~/County/Model/HosExp_Demo_Var_10.07.Rda")
+
+save(ER_Adult_Var_10.07, file="~/County/Model/ER_Adult_Var_10.07.Rda")
+save(IP_Adult_Var_10.07, file="~/County/Model/IP_Adult_Var_10.07.Rda")
+save(HosExp_Adult_Var_10.07, file="~/County/Model/HosExp_Adult_Var_10.07.Rda")
+
+save(ER_Employ_Var_10.07, file="~/County/Model/ER_Employ_Var_10.07.Rda")
+save(IP_Employ_Var_10.07, file="~/County/Model/IP_Employ_Var_10.07.Rda")
+save(HosExp_Employ_Var_10.07, file="~/County/Model/HosExp_Employ_Var_10.07.Rda")
+
+save(ER_Food_Var_10.07, file="~/County/Model/ER_Food_Var_10.07.Rda")
+save(IP_Food_Var_10.07, file="~/County/Model/IP_Food_Var_10.07.Rda")
+save(HosExp_Food_Var_10.07, file="~/County/Model/HosExp_Food_Var_10.07.Rda")
+
+```
+
+##Feature Selection
+
+Two unique feature selection pipelines will be generated. The first will be LASSO and the second will be Random Forest. The goal of this exercise is to identify the most important candidate variables among each of the four domains/groupings for each of the three health utilization metrics. Feature selection will be accomplished in two ways: (1) all candidate variables from each of the four domains/groupings will be run through a LASSO model and (2) all possible candidate variables across from each of the four domains/groupings will be run through a random forest model. 
+
+Set seed for reproducibility
+```{r}
+set.seed(70119)
+```
+
+### Feature selection for each candidate variable domain: LASSO 
+
+Define lambda 
+```{r}
+lambda <- 10^seq(10, -2, length = 100)
+```
+
+####Demographics 
+The first candidate variable domain that will undergo feature selection will be the demographic variables. Recall, there are three unique outcomes (ER visits, IP days, and hospital expenditures). 
+
+Prior to running LASSO for feature selection, need to generate the interaction terms identified from random forest modelling. 
+
+```{r}
+Demo1ER_1215$NonFamMedian_Age_Years_OTFamFemaleHHer_No_Husband_PresentNumFam<-Demo1ER_1215$NonFamMedian_Age_Years*Demo1ER_1215$OTFamFemaleHHer_No_Husband_PresentNumFam
+
+Demo1ER_1215$PopNonInstitutional_Group_QuartersNumPersons_OTFamFemaleHHer_No_Husband_PresentNumFam<-Demo1ER_1215$PopNonInstitutional_Group_QuartersNumPersons*Demo1ER_1215$OTFamFemaleHHer_No_Husband_PresentNumFam
+
+Demo1ER_1215$HHerAged_85_Years_and_OverNumHHs_OTFamFemaleHHer_No_Husband_PresentNumFam<-Demo1ER_1215$HHerAged_85_Years_and_OverNumHHs*Demo1ER_1215$OTFamFemaleHHer_No_Husband_PresentNumFam
+
+Demo1ER_1215$HHswith_No_VehiclesNumHHs_OTFamFemaleHHer_No_Husband_PresentNumFam<-Demo1ER_1215$HHswith_No_VehiclesNumHHs*Demo1ER_1215$OTFamFemaleHHer_No_Husband_PresentNumFam
+
+Demo1ER_1215$EduEn_Pub_Grad_or_Pro_SchoolPop3UpNumPersons_OTFamFemaleHHer_No_Husband_PresentNumFam<-Demo1ER_1215$EduEn_Pub_Grad_or_Pro_SchoolPop3UpNumPersons*Demo1ER_1215$OTFamFemaleHHer_No_Husband_PresentNumFam
+
+Demo1ER_1215$EduAtt_Mas_DegreePop25UpNumPersons_OTFamFemaleHHer_No_Husband_PresentNumFam<-Demo1ER_1215$EduAtt_Mas_DegreePop25UpNumPersons*Demo1ER_1215$OTFamFemaleHHer_No_Husband_PresentNumFam
+
+Demo1ER_1215$EduAtt_Pro_DegreePop25UpNumPersons_OTFamFemaleHHer_No_Husband_PresentNumFam<-Demo1ER_1215$EduAtt_Pro_DegreePop25UpNumPersons*Demo1ER_1215$OTFamFemaleHHer_No_Husband_PresentNumFam
+
+Demo1ER_1215$HHswith_Income_100000_to_124999NumHHs_OTFamFemaleHHer_No_Husband_PresentNumFam<-Demo1ER_1215$HHswith_Income_100000_to_124999NumHHs*Demo1ER_1215$OTFamFemaleHHer_No_Husband_PresentNumFam
+
+Demo1ER_1215$OTFamFemaleHH_No_Husband_Present_ChildLT18NumFam_OTFamFemaleHHer_No_Husband_PresentNumFam<-Demo1ER_1215$OTFamFemaleHH_No_Husband_Present_ChildLT18NumFam*Demo1ER_1215$OTFamFemaleHHer_No_Husband_PresentNumFam
+
+Demo1ER_1215$PopUrbanNumPersons_OTFamFemaleHHer_No_Husband_PresentNumFam<-Demo1ER_1215$PopUrbanNumPersons*Demo1ER_1215$OTFamFemaleHHer_No_Husband_PresentNumFam
+
+Demo1ER_1215$AsianHHsNumHHs_OTFamFemaleHHer_No_Husband_PresentNumFam<-Demo1ER_1215$AsianHHsNumHHs*Demo1ER_1215$OTFamFemaleHHer_No_Husband_PresentNumFam
+
+Demo1ER_1215$Fam3_PersonNumFam_OTFamFemaleHHer_No_Husband_PresentNumFam<-Demo1ER_1215$Fam3_PersonNumFam*Demo1ER_1215$OTFamFemaleHHer_No_Husband_PresentNumFam
+
+Demo1ER_1215$FamAged_Under_25_YearsNumFam_OTFamFemaleHHer_No_Husband_PresentNumFam<-Demo1ER_1215$FamAged_Under_25_YearsNumFam*Demo1ER_1215$OTFamFemaleHHer_No_Husband_PresentNumFam
+
+Demo1ER_1215$WhiteNonHispanicHHsNumHHs_OTFamFemaleHHer_No_Husband_PresentNumFam<-Demo1ER_1215$WhiteNonHispanicHHsNumHHs*Demo1ER_1215$OTFamFemaleHHer_No_Husband_PresentNumFam
+
+Demo1ER_1215$AsianPop_AloneNumPersons_OTFamFemaleHHer_No_Husband_PresentNumFam<-Demo1ER_1215$AsianPop_AloneNumPersons*Demo1ER_1215$OTFamFemaleHHer_No_Husband_PresentNumFam
+
+```
+
+Split ER visits into train and test sets at a .80, 0.20 split ratio, respectively. 
+```{r}
+set.seed(70119)
+d_rf1 <- split_train_test(d = Demo1ER_1215[-1], outcome = TotER17Capita)
+train_set_rf1 <- d_rf1$train
+test_set_rf1 <- d_rf1$test
+```
+
+Turn train and test sets into matrices, as required by glmnet 
+```{r}
+#lasso training and test data turned into matrices 
+x_train1 <- model.matrix(TotER17Capita ~., train_set_rf1)
+x_test1 <- model.matrix(TotER17Capita~., test_set_rf1)
+```
+
+Run LASSO model 
+```{r}
+#run model
+lasso_model1 <- glmnet(x_train1, y= train_set_rf1$TotER17Capita, alpha = 1, family= "gaussian", lambda = lambda)
+cv.out1<- cv.glmnet(x_train1, y= train_set_rf1$TotER17Capita, alpha = 1, family= "gaussian", nfolds = 10)
+#lambda min
+(bestlam_lasso1 = cv.out1$lambda.min)
+#1 se from lambda min
+(selam_lasso1=cv.out1$lambda.1se)
+```
+
+Print model--these are coefficients to be retained in final machine learning modelling 
+```{r}
+#print model
+(test_un1<-coef(cv.out1, s=bestlam_lasso1))
+```
+
+Export non-zero coefficient variables for retention in future models 
+```{r}
+test_un1<-as.matrix(test_un1)
+test_un1<-as.data.frame(test_un1)
+#keep variables that have coefficient value>0 
+ER_Demo_Coef_10.07<- subset(test_un1, test_un1["1"] > 0.000000e+00 | test_un1["1"] < 0.000000e+00 )
+```
+
+Repeat same process for Inpatient (IP) days 
+
+Prior to running, need to generate the interactions terms identified in the random forest second order term investigation 
+```{r}
+Demo1IP_1215$PopTotal_Group_QuartersNumPersons_HHIncome_Per_Capita_DolAmt<-Demo1IP_1215$PopTotal_Group_QuartersNumPersons*Demo1IP_1215$HHIncome_Per_Capita_DolAmt
+
+Demo1IP_1215$PopInstitutional_Group_QuartersNumPersons_HHIncome_Per_Capita_DolAmt<-Demo1IP_1215$PopInstitutional_Group_QuartersNumPersons*Demo1IP_1215$HHIncome_Per_Capita_DolAmt
+
+Demo1IP_1215$PopNonInstitutional_Group_QuartersNumPersons_HHIncome_Per_Capita_DolAmt<-Demo1IP_1215$PopNonInstitutional_Group_QuartersNumPersons*Demo1IP_1215$HHIncome_Per_Capita_DolAmt
+
+Demo1IP_1215$HHswith_No_VehiclesNumHHs_HHIncome_Per_Capita_DolAmt<-Demo1IP_1215$HHswith_No_VehiclesNumHHs*Demo1IP_1215$HHIncome_Per_Capita_DolAmt
+
+Demo1IP_1215$HHswith_1_VehicleNumHHs_HHIncome_Per_Capita_DolAmt<-Demo1IP_1215$HHswith_1_VehicleNumHHs*Demo1IP_1215$HHIncome_Per_Capita_DolAmt
+
+Demo1IP_1215$EduEn_Pub_Grades_5_8Pop3UpNumPersons_HHIncome_Per_Capita_DolAmt<-Demo1IP_1215$EduEn_Pub_Grades_5_8Pop3UpNumPersons*Demo1IP_1215$HHIncome_Per_Capita_DolAmt
+
+Demo1IP_1215$EduEn_Pub_UnGrad_CollegePop3UpNumPersons_HHIncome_Per_Capita_DolAmt<-Demo1IP_1215$EduEn_Pub_UnGrad_CollegePop3UpNumPersons*Demo1IP_1215$HHIncome_Per_Capita_DolAmt
+
+Demo1IP_1215$EduEn_Pub_Grad_or_Pro_SchoolPop3UpNumPersons_HHIncome_Per_Capita_DolAmt<-Demo1IP_1215$EduEn_Pub_Grad_or_Pro_SchoolPop3UpNumPersons*Demo1IP_1215$HHIncome_Per_Capita_DolAmt
+
+Demo1IP_1215$EduAtt_Pro_DegreePop25UpNumPersons_HHIncome_Per_Capita_DolAmt<-Demo1IP_1215$EduAtt_Pro_DegreePop25UpNumPersons*Demo1IP_1215$HHIncome_Per_Capita_DolAmt
+
+Demo1IP_1215$HHs1_PersonNumHHs_HHIncome_Per_Capita_DolAmt<-Demo1IP_1215$HHs1_PersonNumHHs*Demo1IP_1215$HHIncome_Per_Capita_DolAmt
+
+Demo1IP_1215$HeadofHH_FemaleNumHHs_HHIncome_Per_Capita_DolAmt<-Demo1IP_1215$HeadofHH_FemaleNumHHs*Demo1IP_1215$HHIncome_Per_Capita_DolAmt
+
+Demo1IP_1215$FamilyHeadofHH_MaleNumHHs_HHIncome_Per_Capita_DolAmt<-Demo1IP_1215$FamilyHeadofHH_MaleNumHHs*Demo1IP_1215$HHIncome_Per_Capita_DolAmt
+
+Demo1IP_1215$NonFamilyHeadofHH_FemaleNumHHs_HHIncome_Per_Capita_DolAmt<-Demo1IP_1215$NonFamilyHeadofHH_FemaleNumHHs*Demo1IP_1215$HHIncome_Per_Capita_DolAmt
+
+Demo1IP_1215$NonFamilyHHsFemaleHH_NoPplLT18NumHHs_HHIncome_Per_Capita_DolAmt<-Demo1IP_1215$NonFamilyHHsFemaleHH_NoPplLT18NumHHs*Demo1IP_1215$HHIncome_Per_Capita_DolAmt
+
+Demo1IP_1215$NonFamAged_Under_25_YearsNumHHs_HHIncome_Per_Capita_DolAmt<-Demo1IP_1215$NonFamAged_Under_25_YearsNumHHs*Demo1IP_1215$HHIncome_Per_Capita_DolAmt
+
+```
+
+Split IP visits into train and test sets at a .80, 0.20 split ratio, respectively. 
+```{r}
+set.seed(70119)
+d_rf1 <- split_train_test(d = Demo1IP_1215[-1], outcome = InpDay17Capita)
+train_set_rf1 <- d_rf1$train
+test_set_rf1 <- d_rf1$test
+```
+
+Turn train and test sets into matrices, as required by glmnet 
+```{r}
+#lasso training and test data turned into matrixes 
+x_train1 <- model.matrix(InpDay17Capita ~., train_set_rf1)
+x_test1 <- model.matrix(InpDay17Capita~., test_set_rf1)
+```
+
+Run LASSO model 
+```{r}
+#run model
+lasso_model1 <- glmnet(x_train1, y= train_set_rf1$InpDay17Capita, alpha = 1, family= "gaussian", lambda = lambda)
+cv.out1<- cv.glmnet(x_train1, y= train_set_rf1$InpDay17Capita, alpha = 1, family= "gaussian", nfolds=10)
+#lambda min
+(bestlam_lasso1 = cv.out1$lambda.min)
+#1 se from lambda min
+(selam_lasso1=cv.out1$lambda.1se)
+```
+
+Print model--these are coefficients to be retained in final machine learning modelling 
+```{r}
+#print model
+(test_un1<-coef(cv.out1, s=bestlam_lasso1))
+```
+
+Export non-zero coefficient variables for retention in future models 
+```{r}
+test_un1<-as.matrix(test_un1)
+test_un1<-as.data.frame(test_un1)
+#keep variables that have coefficient value>0 
+IP_Demo_Coef_10.07<- subset(test_un1, test_un1["1"] > 0.000000e+00 | test_un1["1"] < 0.000000e+00 )
+```
+
+Repeat for hospital expenditures 
+Need to generate interactions identifed in second order investigation
+
+```{r}
+Demo1Exp_1215$Pop_NonInstitutional_Group_QuartersNumPersons_NonFam_Aged_Under_25_YearsNumHHs<-
+  Demo1Exp_1215$PopNonInstitutional_Group_QuartersNumPersons*Demo1Exp_1215$NonFamAged_Under_25_YearsNumHHs
+
+Demo1Exp_1215$HHIncome_Per_Capita_DolAmt_NonFamAged_Under_25_YearsNumHHs<-Demo1Exp_1215$HHIncome_Per_Capita_DolAmt*Demo1Exp_1215$NonFamAged_Under_25_YearsNumHHs
+
+Demo1Exp_1215$HHer_Aged_85_Years_and_OverNumHHs_NonFam_Aged_Under_25_YearsNumHHs<-Demo1Exp_1215$HHerAged_85_Years_and_OverNumHHs*Demo1Exp_1215$NonFamAged_Under_25_YearsNumHHs
+
+Demo1Exp_1215$HHs5_PersonNumHHs_NonFamAged_Under_25_YearsNumHHs<-Demo1Exp_1215$HHs5_PersonNumHHs*Demo1Exp_1215$NonFamAged_Under_25_YearsNumHHs
+
+Demo1Exp_1215$AsianHHsNumHHs_NonFamAged_Under_25_YearsNumHHs<-Demo1Exp_1215$AsianHHsNumHHs*Demo1Exp_1215$NonFamAged_Under_25_YearsNumHHs
+
+Demo1Exp_1215$Pop_DensityNumPersons_per_Sq_Mile_NonFam_Aged_Under_25_YearsNumHHs<-Demo1Exp_1215$PopDensityNumPersons_per_Sq_Mile*Demo1Exp_1215$NonFamAged_Under_25_YearsNumHHs
+
+Demo1Exp_1215$Edu_Att_Pro_DegreePop25UpNumPersons_NonFam_Aged_Under_25_YearsNumHHs<-Demo1Exp_1215$EduAtt_Pro_DegreePop25UpNumPersons*Demo1Exp_1215$NonFamAged_Under_25_YearsNumHHs
+
+Demo1Exp_1215$NonFam4_PersonNumHHs_NonFamAged_Under_25_YearsNumHHs<-Demo1Exp_1215$NonFam4_PersonNumHHs*Demo1Exp_1215$NonFamAged_Under_25_YearsNumHHs
+
+Demo1Exp_1215$HHs_1_PersonNumHHs_NonFam_Aged_Under_25_YearsNumHHs<-Demo1Exp_1215$HHs1_PersonNumHHs*Demo1Exp_1215$NonFamAged_Under_25_YearsNumHHs
+
+Demo1Exp_1215$NonFam_1_PersonNumHHs_NonFam_Aged_Under_25_YearsNumHHs<-Demo1Exp_1215$NonFam1_PersonNumHHs*Demo1Exp_1215$NonFamAged_Under_25_YearsNumHHs
+
+Demo1Exp_1215$WhiteNonHispanicHHsNumHHs_NonFamAged_Under_25_YearsNumHHs<-Demo1Exp_1215$WhiteNonHispanicHHsNumHHs*Demo1Exp_1215$NonFamAged_Under_25_YearsNumHHs
+
+Demo1Exp_1215$AsianPop_AloneNumPersons_NonFamAged_Under_25_YearsNumHHs<-Demo1Exp_1215$AsianPop_AloneNumPersons*Demo1Exp_1215$NonFamAged_Under_25_YearsNumHHs
+```
+
+Split Hospital per capita visits into train and test sets at a .80, 0.20 split ratio, respectively. 
+```{r}
+set.seed(70119)
+d_rf1 <- split_train_test(d = Demo1Exp_1215[-1], outcome = HosExpCapita)
+train_set_rf1 <- d_rf1$train
+test_set_rf1 <- d_rf1$test
+```
+
+Turn train and test sets into matrices, as required by glmnet 
+```{r}
+#lasso training and test data turned into matrices 
+x_train1 <- model.matrix(HosExpCapita ~., train_set_rf1)
+x_test1 <- model.matrix(HosExpCapita~., test_set_rf1)
+```
+
+Run LASSO model 
+```{r}
+#run model
+lasso_model1 <- glmnet(x_train1, y= train_set_rf1$HosExpCapita, alpha = 1, family= "gaussian", lambda = lambda)
+cv.out1<- cv.glmnet(x_train1, y= train_set_rf1$HosExpCapita, alpha = 1, family= "gaussian", nfolds=10)
+#lambda min
+(bestlam_lasso1 = cv.out1$lambda.min)
+#1 se from lambda min
+(selam_lasso1=cv.out1$lambda.1se)
+```
+
+Print model--these are coefficients to be retained in final machine learning modelling 
+```{r}
+#print model
+(test_un1<-coef(cv.out1, s=bestlam_lasso1))
+```
+
+Export non-zero coefficient variables for retention in future models 
+```{r}
+test_un1<-as.matrix(test_un1)
+test_un1<-as.data.frame(test_un1)
+#keep variables that have coefficient value>0 
+Exp_Demo_Coef_10.07<- subset(test_un1, test_un1["1"] > 0.000000e+00 | test_un1["1"] < 0.000000e+00 )
+```
+
+#### Adult & child disease and health status 
+
+Generate interactions previously identified 
+
+```{r}
+DxHealthER_1215$AerobicOnly_Insufficiently_active_CountHHNumPersons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthER_1215$AerobicOnly_Insufficiently_active_CountHHNumPersons*DxHealthER_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthER_1215$Alcohol_Lifetime_abstainer__CountHHNumPersons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthER_1215$Alcohol_Lifetime_abstainer__CountHHNumPersons*DxHealthER_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthER_1215$Alcohol_current_infrequent_CountHHNumPersons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthER_1215$Alcohol_current_infrequent_CountHHNumPersons*DxHealthER_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthER_1215$Hay_Fever_CountHHNumPersons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthER_1215$Hay_Fever_CountHHNumPersons*DxHealthER_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthER_1215$Body_mass_index_Overweight_CountHHNumPersons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthER_1215$Body_mass_index_Overweight_CountHHNumPersons*DxHealthER_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthER_1215$Num_Day_miss_12mns_5_17yrs_11More_CountHH_.Persons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthER_1215$Num_Day_miss_12mns_5_17yrs_11More_CountHH_.Persons*DxHealthER_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthER_1215$ER_vispast12monthschildLT18_None_CountHH_.Persons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthER_1215$ER_vispast12monthschildLT18_None_CountHH_.Persons*DxHealthER_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthER_1215$ER_vispast12monthschildLT18_TwoMore_CountHH_.Persons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthER_1215$ER_vispast12monthschildLT18_TwoMore_CountHH_.Persons*DxHealthER_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthER_1215$PrescMed_foratleast3monthsCountHH_.Persons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthER_1215$PrescMed_foratleast3monthsCountHH_.Persons*DxHealthER_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthER_1215$FairofPoorHeaStatResp_AssessedCountHH_.Persons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthER_1215$FairofPoorHeaStatResp_AssessedCountHH_.Persons*DxHealthER_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthER_1215$Allpersonsw_usual_healthcare_ERCountHH_.Persons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthER_1215$Allpersonsw_usual_healthcare_ERCountHH_.Persons*DxHealthER_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthER_1215$OffVisit_MT2yrsless_than5yrsCountHH_.Persons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthER_1215$OffVisit_MT2yrsless_than5yrsCountHH_.Persons*DxHealthER_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthER_1215$OffVisit_MT1yrnoMT2yrsCountHH_.Persons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthER_1215$OffVisit_MT1yrnoMT2yrsCountHH_.Persons*DxHealthER_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthER_1215$UninsuredforhealthcareCountHH_.Persons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthER_1215$UninsuredforhealthcareCountHH_.Persons*DxHealthER_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthER_1215$DelayedcareduetocostCountHH_.Persons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthER_1215$DelayedcareduetocostCountHH_.Persons*DxHealthER_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+```
+
+Split ER visits into train and test sets at a .80, 0.20 split ratio, respectively. 
+```{r}
+set.seed(70119)
+d_rf1 <- split_train_test(d = DxHealthER_1215[-c(1,2)], outcome = TotER17Capita)
+train_set_rf1 <- d_rf1$train
+test_set_rf1 <- d_rf1$test
+```
+
+Turn train and test sets into matrices, as required by glmnet 
+```{r}
+#lasso training and test data turned into matrixes 
+x_train1 <- model.matrix(TotER17Capita ~., train_set_rf1)
+x_test1 <- model.matrix(TotER17Capita~., test_set_rf1)
+```
+
+Run LASSO model 
+```{r warning=FALSE}
+#run model
+lasso_model1 <- glmnet(x_train1, y= train_set_rf1$TotER17Capita, alpha = 1, family= "gaussian")
+cv.out1<- cv.glmnet(x_train1, y= train_set_rf1$TotER17Capita, alpha = 1, family= "gaussian")
+#lambda min
+(bestlam_lasso1 = cv.out1$lambda.min)
+#1 se from lambda min
+(selam_lasso1=cv.out1$lambda.1se)
+```
+
+Print model--these are coefficients to be retained in final machine learning modelling 
+```{r}
+#print model
+(test_un1<-coef(cv.out1, s=bestlam_lasso1))
+```
+
+Export non-zero coefficient variables for retention in future models 
+```{r}
+test_un1<-as.matrix(test_un1)
+test_un1<-as.data.frame(test_un1)
+#keep variables that have coefficient value>0 
+ER_Adult_Coef_10.07<- subset(test_un1, test_un1["1"] > 0.000000e+00 | test_un1["1"] < 0.000000e+00 )
+```
+
+Repeat same process for Inpatient (IP) days 
+
+Before running feature selection, will generate second order terms identified previously.
+```{r}
+DxHealthIP_1215$AerobicOnly_Insufficiently_active_CountHHNumPersons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthIP_1215$AerobicOnly_Insufficiently_active_CountHHNumPersons*DxHealthIP_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthIP_1215$AerobicStrength_Met_aerobic_only_CountHHNumPersons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthIP_1215$AerobicStrength_Met_aerobic_only_CountHHNumPersons*DxHealthIP_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthIP_1215$Alcohol_current_infrequent_CountHHNumPersons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthIP_1215$Alcohol_current_infrequent_CountHHNumPersons*DxHealthIP_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthIP_1215$Body_mass_index_Underweight_CountHHNumPersons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthIP_1215$Body_mass_index_Underweight_CountHHNumPersons*DxHealthIP_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthIP_1215$Body_mass_index_Overweight_CountHHNumPersons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthIP_1215$Body_mass_index_Overweight_CountHHNumPersons*DxHealthIP_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthIP_1215$TypeSome_other_place_CountHHNumPersons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthIP_1215$TypeSome_other_place_CountHHNumPersons*DxHealthIP_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthIP_1215$Doctor_never_CountHHNumPersons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthIP_1215$Doctor_never_CountHHNumPersons*DxHealthIP_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthIP_1215$Num_Day_miss_12mns_5_17yrs_3.5daysCountHH_.Persons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthIP_1215$Num_Day_miss_12mns_5_17yrs_3.5daysCountHH_.Persons*DxHealthIP_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthIP_1215$Num_Day_miss_12mns_5_17yrs_6.10daysCountHH_.Persons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthIP_1215$Num_Day_miss_12mns_5_17yrs_6.10daysCountHH_.Persons*DxHealthIP_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthIP_1215$ER_vispast12monthschildLT18_TwoMore_CountHH_.Persons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthIP_1215$ER_vispast12monthschildLT18_TwoMore_CountHH_.Persons*DxHealthIP_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthIP_1215$StillhaveAsthmaCountHH_.Persons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthIP_1215$StillhaveAsthmaCountHH_.Persons*DxHealthIP_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthIP_1215$SkinAllergiesCountHH_.Persons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthIP_1215$SkinAllergiesCountHH_.Persons*DxHealthIP_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthIP_1215$OffVisit_MT1yrnoMT2yrsCountHH_.Persons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthIP_1215$OffVisit_MT1yrnoMT2yrsCountHH_.Persons*DxHealthIP_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthIP_1215$OffVisit_MT5yrsCountHH_.Persons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthIP_1215$OffVisit_MT5yrsCountHH_.Persons*DxHealthIP_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthIP_1215$Children2.17yrs_nounmetdentalneedCountHH_.Persons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthIP_1215$Children2.17yrs_nounmetdentalneedCountHH_.Persons*DxHealthIP_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+```
+
+Split IP days into train and test sets at a .80, 0.20 split ratio, respectively. 
+```{r}
+set.seed(70119)
+d_rf1 <- split_train_test(d = DxHealthIP_1215[-c(1)], outcome = InpDay17Capita)
+train_set_rf1 <- d_rf1$train
+test_set_rf1 <- d_rf1$test
+```
+
+Turn train and test sets into matrices, as required by glmnet 
+```{r}
+#lasso training and test data turned into matrices 
+x_train1 <- model.matrix(InpDay17Capita ~., train_set_rf1)
+x_test1 <- model.matrix(InpDay17Capita~., test_set_rf1)
+```
+
+Run LASSO model 
+```{r}
+#run model
+lasso_model1 <- glmnet(x_train1, y= train_set_rf1$InpDay17Capita, alpha = 1, family= "gaussian")
+cv.out1<- cv.glmnet(x_train1, y= train_set_rf1$InpDay17Capita, alpha = 1, family= "gaussian")
+#lambda min
+(bestlam_lasso1 = cv.out1$lambda.min)
+#1 se from lambda min
+(selam_lasso1=cv.out1$lambda.1se)
+```
+
+Print model--these are coefficients to be retained in final machine learning modelling 
+```{r}
+#print model
+(test_un1<-coef(cv.out1, s=bestlam_lasso1))
+```
+
+Export non-zero coefficient variables for retention in future models 
+```{r}
+test_un1<-as.matrix(test_un1)
+test_un1<-as.data.frame(test_un1)
+#keep variables that have coefficient value>0 
+IP_Adult_Coef_10.07<- subset(test_un1, test_un1["1"] > 0.000000e+00 | test_un1["1"] < 0.000000e+00 )
+```
+
+Repeat for hospital expenditures 
+
+First generate the second order terms identified previously.
+```{r}
+DxHealthExp_1215$HIVEver_tested_CountHHNumPersons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthExp_1215$HIVEver_tested_CountHHNumPersons*DxHealthExp_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthExp_1215$Cervical_cancer_CountHHNumPersons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthExp_1215$Cervical_cancer_CountHHNumPersons*DxHealthExp_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthExp_1215$Kidney_disease_CountHHNumPersons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthExp_1215$Kidney_disease_CountHHNumPersons*DxHealthExp_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthExp_1215$Ever_had_Asthma_CountHHNumPersons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthExp_1215$Ever_had_Asthma_CountHHNumPersons*DxHealthExp_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthExp_1215$Still_has_Asthma_CountHHNumPersons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthExp_1215$Still_has_Asthma_CountHHNumPersons*DxHealthExp_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthExp_1215$Body_mass_index_Underweight_CountHHNumPersons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthExp_1215$Body_mass_index_Underweight_CountHHNumPersons*DxHealthExp_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthExp_1215$Body_mass_index_Obese_CountHHNumPersons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthExp_1215$Body_mass_index_Obese_CountHHNumPersons*DxHealthExp_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthExp_1215$TypeSome_other_place_CountHHNumPersons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthExp_1215$TypeSome_other_place_CountHHNumPersons*DxHealthExp_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthExp_1215$Num_Day_miss_12mns_5_17yrs_3.5daysCountHH_.Persons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthExp_1215$Num_Day_miss_12mns_5_17yrs_3.5daysCountHH_.Persons*DxHealthExp_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthExp_1215$RespiratoryAllergiesCountHH_.Persons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthExp_1215$RespiratoryAllergiesCountHH_.Persons*DxHealthExp_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthExp_1215$Children3to17_ADHDCountHH_.Persons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthExp_1215$Children3to17_ADHDCountHH_.Persons*DxHealthExp_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthExp_1215$OffVisit_MTsixmonthsLT1yrCountHH_.Persons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthER_1215$OffVisit_MTsixmonthsLT1yrCountHH_.Persons*DxHealthExp_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthExp_1215$OffVisit_MT5yrsCountHH_.Persons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthExp_1215$OffVisit_MT5yrsCountHH_.Persons*DxHealthExp_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthExp_1215$DelayedcareduetocostCountHH_.Persons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthExp_1215$DelayedcareduetocostCountHH_.Persons*DxHealthExp_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+DxHealthExp_1215$Children2.17yrs_lessthan6monthsdentalVisitCountHH_.Persons_Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons<-DxHealthExp_1215$Children2.17yrs_lessthan6monthsdentalVisitCountHH_.Persons*DxHealthExp_1215$Children2.17yrs_MT5yrsdentalVisitCountHH_.Persons
+
+```
+
+Split Hospital per capita visits into train and test sets at a .80, 0.20 split ratio, respectively. 
+```{r}
+set.seed(70119)
+d_rf1 <- split_train_test(d = DxHealthExp_1215[-1], outcome = HosExpCapita)
+train_set_rf1 <- d_rf1$train
+test_set_rf1 <- d_rf1$test
+```
+
+Turn train and test sets into matrices, as required by glmnet 
+```{r}
+#lasso training and test data turned into matrices 
+x_train1 <- model.matrix(HosExpCapita ~., train_set_rf1)
+x_test1 <- model.matrix(HosExpCapita~., test_set_rf1)
+```
+
+Run LASSO model 
+```{r}
+#run model
+lasso_model1 <- glmnet(x_train1, y= train_set_rf1$HosExpCapita, alpha = 1, family= "gaussian")
+cv.out1<- cv.glmnet(x_train1, y= train_set_rf1$HosExpCapita, alpha = 1, family= "gaussian")
+#lambda min
+(bestlam_lasso1 = cv.out1$lambda.min)
+#1 se from lambda min
+(selam_lasso1=cv.out1$lambda.1se)
+```
+
+Print model--these are coefficients to be retained in final machine learning modelling 
+```{r}
+#print model
+(test_un1<-coef(cv.out1, s=bestlam_lasso1))
+```
+
+Export non-zero coefficient variables for retention in future models 
+```{r}
+test_un1<-as.matrix(test_un1)
+test_un1<-as.data.frame(test_un1)
+#keep variables that have coefficient value>0 
+Exp_Adult_Coef_10.07<- subset(test_un1, test_un1["1"] > 0.000000e+00 | test_un1["1"] < 0.000000e+00 )
+```
+
+### Community variable: employment and housing 
+
+Generate second order terms
+```{r}
+CommER_1215$Car_Truck_Van_to_Work_Alone_.Per_Hou_Renter_Occupied<-CommER_1215$Car_Truck_Van_to_Work_Alone_.Per*CommER_1215$Hou_Renter_Occupied
+
+CommER_1215$Emp_Work_at_Home_.Per_Hou_Renter_Occupied<-CommER_1215$Emp_Work_at_Home_.Per*CommER_1215$Hou_Renter_Occupied
+
+CommER_1215$Emp_Travel_Time_15.29_Min_.Per_Hou_Renter_Occupied<-CommER_1215$Emp_Travel_Time_15.29_Min_.Per*CommER_1215$Hou_Renter_Occupied
+
+CommER_1215$Emp_Travel_Time_30.59_Min_.Per_Hou_Renter_Occupied<-CommER_1215$Emp_Travel_Time_30.59_Min_.Per*CommER_1215$Hou_Renter_Occupied
+
+CommER_1215$Emp_Agriculture_Forestry_Fishing_and_Hunting_.Per_Hou_Renter_Occupied<-CommER_1215$Emp_Agriculture_Forestry_Fishing_and_Hunting_.Per*CommER_1215$Hou_Renter_Occupied
+
+CommER_1215$Emp_Wholesale_Trade_.Per_Hou_Renter_Occupied<-CommER_1215$Emp_Wholesale_Trade_.Per*CommER_1215$Hou_Renter_Occupied
+
+CommER_1215$Emp_Health_Care_and_Social_Assistance_.Per_Hou_Renter_Occupied<-CommER_1215$Emp_Health_Care_and_Social_Assistance_.Per*CommER_1215$Hou_Renter_Occupied
+
+CommER_1215$Occ_ManagementBusiness_and_Financial_Operations_.Per_Hou_Renter_Occupied<-CommER_1215$Occ_ManagementBusiness_and_Financial_Operations_.Per*CommER_1215$Hou_Renter_Occupied
+
+CommER_1215$Occ_Farming_Fishing_and_Forestry_.Per_Hou_Renter_Occupied<-CommER_1215$Occ_Farming_Fishing_and_Forestry_.Per*CommER_1215$Hou_Renter_Occupied
+
+CommER_1215$Emp_Self.Employed_Workers_in_Own_Not_IncorporatedBusiness_.Per_Hou_Renter_Occupied<-CommER_1215$Emp_Self.Employed_Workers_in_Own_Not_IncorporatedBusiness_.Per*CommER_1215$Hou_Renter_Occupied
+
+CommER_1215$Hou_Median_RentCountDollar_Hou_Renter_Occupied<-CommER_1215$Hou_Median_RentCountDollar*CommER_1215$Hou_Renter_Occupied
+
+CommER_1215$Hou_Vacant_Units_For_Migrant_Workers_Hou_Renter_Occupied<-CommER_1215$Hou_Vacant_Units_For_Migrant_Workers*CommER_1215$Hou_Renter_Occupied
+
+CommER_1215$Hou_Str_Boat_RV_Van_Other_Hou_Renter_Occupied<-CommER_1215$Hou_Str_Boat_RV_Van_Other*CommER_1215$Hou_Renter_Occupied
+
+CommER_1215$Hou_Rent_less_than_250_Hou_Renter_Occupied<-CommER_1215$Hou_Rent_less_than_250*CommER_1215$Hou_Renter_Occupied
+
+CommER_1215$Hou_OwnerHouseholds_Valued_250000_299999_Hou_Renter_Occupied<-CommER_1215$Hou_OwnerHouseholds_Valued_250000_299999*CommER_1215$Hou_Renter_Occupied
+
+```
+
+Split ER visits into train and test sets at a .80, 0.20 split ratio, respectively. 
+```{r}
+set.seed(70119)
+d_rf1 <- split_train_test(d = CommER_1215[-1], outcome = TotER17Capita)
+train_set_rf1 <- d_rf1$train
+test_set_rf1 <- d_rf1$test
+```
+
+Turn train and test sets into matrices, as required by glmnet 
+```{r}
+#lasso training and test data turned into matrixes 
+x_train1 <- model.matrix(TotER17Capita ~., train_set_rf1)
+x_test1 <- model.matrix(TotER17Capita~., test_set_rf1)
+```
+
+Run LASSO model 
+```{r warning=FALSE}
+#run model
+lasso_model1 <- glmnet(x_train1, y= train_set_rf1$TotER17Capita, alpha = 1, family= "gaussian")
+cv.out1<- cv.glmnet(x_train1, y= train_set_rf1$TotER17Capita, alpha = 1, family= "gaussian")
+#lambda min
+(bestlam_lasso1 = cv.out1$lambda.min)
+#1 se from lambda min
+(selam_lasso1=cv.out1$lambda.1se)
+```
+
+Print model--these are coefficients to be retained in final machine learning modelling 
+```{r}
+#print model
+(test_un1<-coef(cv.out1, s=bestlam_lasso1))
+```
+
+Export non-zero coefficient variables for retention in future models 
+```{r}
+test_un1<-as.matrix(test_un1)
+test_un1<-as.data.frame(test_un1)
+#keep variables that have coefficient value>0 
+ER_Employ_Coef_10.07<- subset(test_un1, test_un1["1"] > 0.000000e+00 | test_un1["1"] < 0.000000e+00 )
+```
+
+Repeat same process for Inpatient (IP) days 
+
+Generate second order terms previously identified 
+
+```{r}
+CommIP_1215$Emp_Wholesale_Trade_.Per_Emp_Health_Care_and_Social_Assistance_.Per<-CommIP_1215$Emp_Wholesale_Trade_.Per*CommIP_1215$Emp_Health_Care_and_Social_Assistance_.Per
+
+CommIP_1215$Occ_Construction_Extraction_and_Maintenance_.Per_Emp_Health_Care_and_Social_Assistance_.Per<-CommIP_1215$Occ_Construction_Extraction_and_Maintenance_.Per*CommIP_1215$Emp_Health_Care_and_Social_Assistance_.Per
+
+CommIP_1215$Emp_Travel_Time_30.59_Min_.Per_Emp_Health_Care_and_Social_Assistance_.Per<-CommIP_1215$Emp_Travel_Time_30.59_Min_.Per*CommIP_1215$Emp_Health_Care_and_Social_Assistance_.Per
+
+CommIP_1215$Emp_Travel_Time_60.89_Min_.Per_Emp_Health_Care_and_Social_Assistance_.Per<-CommIP_1215$Emp_Travel_Time_60.89_Min_.Per*CommIP_1215$Emp_Health_Care_and_Social_Assistance_.Per
+
+CommIP_1215$Emp_Agriculture_Forestry_Fishing_and_Hunting_.Per_Emp_Health_Care_and_Social_Assistance_.Per<-CommIP_1215$Emp_Agriculture_Forestry_Fishing_and_Hunting_.Per*CommIP_1215$Emp_Health_Care_and_Social_Assistance_.Per
+
+CommIP_1215$Emp_Private_for.Profit_Wage_and_Salary_WorkersEmployee_.Per_Emp_Health_Care_and_Social_Assistance_.Per<-CommIP_1215$Emp_Private_for.Profit_Wage_and_Salary_WorkersEmployee_.Per*CommIP_1215$Emp_Health_Care_and_Social_Assistance_.Per
+
+CommIP_1215$HouHeatFuel_Bottled_tank_or_LP_gas_Emp_Health_Care_and_Social_Assistance_.Per<-CommIP_1215$HouHeatFuel_Bottled_tank_or_LP_gas*CommIP_1215$Emp_Health_Care_and_Social_Assistance_.Per
+
+CommIP_1215$Hou_Str_with_1_Unit_Detached_Emp_Health_Care_and_Social_Assistance_.Per<-CommIP_1215$Hou_Str_with_1_Unit_Detached*CommIP_1215$Emp_Health_Care_and_Social_Assistance_.Per
+
+CommIP_1215$Hou_Str_with_2_Emp_Health_Care_and_Social_Assistance_.Per<-CommIP_1215$Hou_Str_with_2*CommIP_1215$Emp_Health_Care_and_Social_Assistance_.Per
+
+CommIP_1215$Hou_Str_with_5_9_Emp_Health_Care_and_Social_Assistance_.Per<-CommIP_1215$Hou_Str_with_5_9*CommIP_1215$Emp_Health_Care_and_Social_Assistance_.Per
+
+CommIP_1215$Hou_Str_with_50_Emp_Health_Care_and_Social_Assistance_.Per<-CommIP_1215$Hou_Str_with_50*CommIP_1215$Emp_Health_Care_and_Social_Assistance_.Per
+
+CommIP_1215$Hou_Year_Moved_in_1990_to_1999_Emp_Health_Care_and_Social_Assistance_.Per<-CommIP_1215$Hou_Year_Moved_in_1990_to_1999*CommIP_1215$Emp_Health_Care_and_Social_Assistance_.Per
+
+CommIP_1215$Hou_Year_Moved_in_1969_or_Earlier_Emp_Health_Care_and_Social_Assistance_.Per<-CommIP_1215$Hou_Year_Moved_in_1969_or_Earlier*CommIP_1215$Emp_Health_Care_and_Social_Assistance_.Per
+
+CommIP_1215$Hou_Owner_Occupied_Emp_Health_Care_and_Social_Assistance_.Per<-CommIP_1215$Hou_Owner_Occupied*CommIP_1215$Emp_Health_Care_and_Social_Assistance_.Per
+
+CommIP_1215$Hou_Renter_Occupied_Emp_Health_Care_and_Social_Assistance_.Per<-CommIP_1215$Hou_Renter_Occupied*CommIP_1215$Emp_Health_Care_and_Social_Assistance_.Per
+
+CommIP_1215$Hou_OwnerHouseholds_Valued_35000_39999_Emp_Health_Care_and_Social_Assistance_.Per<-CommIP_1215$Hou_OwnerHouseholds_Valued_35000_39999*CommIP_1215$Emp_Health_Care_and_Social_Assistance_.Per
+
+```
+
+Split IP days into train and test sets at a .80, 0.20 split ratio, respectively. 
+```{r}
+set.seed(70119)
+d_rf1 <- split_train_test(d = CommIP_1215[-c(1)], outcome = InpDay17Capita)
+train_set_rf1 <- d_rf1$train
+test_set_rf1 <- d_rf1$test
+```
+
+Turn train and test sets into matrices, as required by glmnet 
+```{r}
+#lasso training and test data turned into matrixes 
+x_train1 <- model.matrix(InpDay17Capita ~., train_set_rf1)
+x_test1 <- model.matrix(InpDay17Capita~., test_set_rf1)
+```
+
+Run LASSO model 
+```{r}
+#run model
+lasso_model1 <- glmnet(x_train1, y= train_set_rf1$InpDay17Capita, alpha = 1, family= "gaussian")
+cv.out1<- cv.glmnet(x_train1, y= train_set_rf1$InpDay17Capita, alpha = 1, family= "gaussian")
+#lambda min
+(bestlam_lasso1 = cv.out1$lambda.min)
+#1 se from lambda min
+(selam_lasso1=cv.out1$lambda.1se)
+```
+
+Print model--these are coefficients to be retained in final machine learning modelling 
+```{r}
+#print model
+(test_un1<-coef(cv.out1, s=bestlam_lasso1))
+```
+
+Export non-zero coefficient variables for retention in future models 
+```{r}
+test_un1<-as.matrix(test_un1)
+test_un1<-as.data.frame(test_un1)
+#keep variables that have coefficient value>0 
+IP_Employ_Coef_10.07<- subset(test_un1, test_un1["1"] > 0.000000e+00 | test_un1["1"] < 0.000000e+00 )
+```
+
+Repeat for hospital expenditures 
+
+Generate second order terms previously identified 
+
+```{r}
+CommExp_1215$Emp_Walked_to_Work_.Per_Emp_Travel_Time_30.59_Min_.Per<-CommExp_1215$Emp_Walked_to_Work_.Per*CommExp_1215$Emp_Travel_Time_30.59_Min_.Per
+
+CommExp_1215$Emp_Agriculture_Forestry_Fishing_and_Hunting_.Per_Emp_Travel_Time_30.59_Min_.Per<-CommExp_1215$Emp_Agriculture_Forestry_Fishing_and_Hunting_.Per*CommExp_1215$Emp_Travel_Time_30.59_Min_.Per
+
+CommExp_1215$Emp_Health_Care_and_Social_Assistance_.Per_Emp_Travel_Time_30.59_Min_.Per<-CommExp_1215$Emp_Health_Care_and_Social_Assistance_.Per*CommExp_1215$Emp_Travel_Time_30.59_Min_.Per
+
+CommExp_1215$Emp_White_Collar_.Per_Emp_Travel_Time_30.59_Min_.Per<-CommExp_1215$Emp_White_Collar_.Per*CommExp_1215$Emp_Travel_Time_30.59_Min_.Per
+
+CommExp_1215$Emp_Private_Not.for.Profit_Wage_and_Salary_Workers_.Per_Emp_Travel_Time_30.59_Min_.Per<-CommExp_1215$Emp_Private_Not.for.Profit_Wage_and_Salary_Workers_.Per*CommExp_1215$Emp_Travel_Time_30.59_Min_.Per
+
+CommExp_1215$Hou_Str_with_10_19_Emp_Travel_Time_30.59_Min_.Per<-CommExp_1215$Hou_Str_with_10_19*CommExp_1215$Emp_Travel_Time_30.59_Min_.Per
+
+CommExp_1215$Hou_Str_with_20_49_Emp_Travel_Time_30.59_Min_.Per<-CommExp_1215$Hou_Str_with_20_49*CommExp_1215$Emp_Travel_Time_30.59_Min_.Per
+
+CommExp_1215$Hou_Str_with_50_Emp_Travel_Time_30.59_Min_.Per<-CommExp_1215$Hou_Str_with_50*CommExp_1215$Emp_Travel_Time_30.59_Min_.Per
+
+CommExp_1215$Hou_Renter_Occupied_Emp_Travel_Time_30.59_Min_.Per<-CommExp_1215$Hou_Renter_Occupied*CommExp_1215$Emp_Travel_Time_30.59_Min_.Per
+
+CommExp_1215$Emp_Private_for.Profit_Wage_and_Salary_WorkersEmployee_.Per_Emp_Travel_Time_30.59_Min_.Per<-CommExp_1215$Emp_Private_for.Profit_Wage_and_Salary_WorkersEmployee_.Per*CommExp_1215$Emp_Travel_Time_30.59_Min_.Per
+
+CommExp_1215$HouHeatFuel_Bottled_tank_or_LP_gas_Emp_Travel_Time_30.59_Min_.Per<-CommExp_1215$HouHeatFuel_Bottled_tank_or_LP_gas*CommExp_1215$Emp_Travel_Time_30.59_Min_.Per
+
+CommExp_1215$Hou_Built_1990_to_1999_Emp_Travel_Time_30.59_Min_.Per<-CommExp_1215$Hou_Built_1990_to_1999*CommExp_1215$Emp_Travel_Time_30.59_Min_.Per
+
+CommExp_1215$Hou_Year_Moved_in_2000_to_2009_Emp_Travel_Time_30.59_Min_.Per<-CommExp_1215$Hou_Year_Moved_in_2000_to_2009*CommExp_1215$Emp_Travel_Time_30.59_Min_.Per
+
+CommExp_1215$Hou_Year_Moved_in_1990_to_1999_Emp_Travel_Time_30.59_Min_.Per<-CommExp_1215$Hou_Year_Moved_in_1990_to_1999*CommExp_1215$Emp_Travel_Time_30.59_Min_.Per
+
+CommExp_1215$Hou_Owner_Occupied_Emp_Travel_Time_30.59_Min_.Per<-CommExp_1215$Hou_Owner_Occupied*CommExp_1215$Emp_Travel_Time_30.59_Min_.Per
+```
+
+Split Hospital per capita visits into train and test sets at a .80, 0.20 split ratio, respectively. 
+```{r}
+set.seed(70119)
+d_rf1 <- split_train_test(d = CommExp_1215[-c(1)], outcome = HosExpCapita)
+train_set_rf1 <- d_rf1$train
+test_set_rf1 <- d_rf1$test
+```
+
+Turn train and test sets into matrices, as required by glmnet 
+```{r}
+#lasso training and test data turned into matrixes 
+x_train1 <- model.matrix(HosExpCapita ~., train_set_rf1)
+x_test1 <- model.matrix(HosExpCapita~., test_set_rf1)
+```
+
+Run LASSO model 
+```{r}
+#run model
+lasso_model1 <- glmnet(x_train1, y= train_set_rf1$HosExpCapita, alpha = 1, family= "gaussian")
+cv.out1<- cv.glmnet(x_train1, y= train_set_rf1$HosExpCapita, alpha = 1, family= "gaussian")
+#lambda min
+(bestlam_lasso1 = cv.out1$lambda.min)
+#1 se from lambda min
+(selam_lasso1=cv.out1$lambda.1se)
+```
+
+Print model--these are coefficients to be retained in final machine learning modelling 
+```{r}
+#print model
+(test_un1<-coef(cv.out1, s=bestlam_lasso1))
+```
+
+Export non-zero coefficient variables for retention in future models 
+```{r}
+test_un1<-as.matrix(test_un1)
+test_un1<-as.data.frame(test_un1)
+#keep variables that have coefficient value>0 
+Exp_Employ_Coef_10.07<- subset(test_un1, test_un1["1"] > 0.000000e+00 | test_un1["1"] < 0.000000e+00 )
+```
+
+### Food, Household, Miscelleanous consumer purchases 
+
+Generate second order terms previously identified
+
+```{r}
+ConsER_1215$Baby_food_TotDollar_Rent_as_pay_TotAmt<-ConsER_1215$Baby_food_TotDollar*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Nonalcoholic_beer_TotDollar_Rent_as_pay_TotAmt<-ConsER_1215$Nonalcoholic_beer_TotDollar*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Dinner_at_EmScCafe_TotDollar_Rent_as_pay_TotAmt<-ConsER_1215$Dinner_at_EmScCafe_TotDollar*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Snack_nonalcoholic_bev_at_EmScCafe_TotDollar_Rent_as_pay_TotAmt<-ConsER_1215$Snack_nonalcoholic_bev_at_EmScCafe_TotDollar*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Breakfast_and_brunch_at_EmScCafe_TotDollar_Rent_as_pay_TotAmt	<-ConsER_1215$Breakfast_and_brunch_at_EmScCafe_TotDollar*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Meals_as_pay_TotDollar_Rent_as_pay_TotAmt<-ConsER_1215$Meals_as_pay_TotDollar*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Test_preparation_tutoring_services_TotDollar_Rent_as_pay_TotAmt<-ConsER_1215$Test_preparation_tutoring_services_TotDollar*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$School_supplies_for_day_care_nursery_TotDollar_Rent_as_pay_TotAmt<-ConsER_1215$School_supplies_for_day_care_nursery_TotDollar*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Mortgage_interest_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Mortgage_interest_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Interest_paid_home_equity_loan_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Interest_paid_home_equity_loan_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Ground_rent_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Ground_rent_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Rented_dwellings_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Rented_dwellings_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Rent_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Rent_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Main_insurance_andOther_exp_Rented_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Main_insurance_andOther_exp_Rented_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Tenants_insurance_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Tenants_insurance_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Coin.operated_HH_laundry_dryclean_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Coin.operated_HH_laundry_dryclean_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Computer_Installation_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Computer_Installation_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Delivery_services_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Delivery_services_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Sewing_machines_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Sewing_machines_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Flatware_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Flatware_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Telephones_and_accessories_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Telephones_and_accessories_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Lawn_and_garden_equipt_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Lawn_and_garden_equipt_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Rental_of_furn_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Rental_of_furn_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Boys_hosiery_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Boys_hosiery_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Womens_sportcoats_tailored_jackets_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Womens_sportcoats_tailored_jackets_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Girlshosiery_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Girlshosiery_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Girlsuniforms_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Girlsuniforms_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Girlscostumes_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Girlscostumes_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Infant_nightwear_loungewear_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Infant_nightwear_loungewear_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Online_gaming_services_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Online_gaming_services_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Repair_of_tv_radio_and_sound_equipt_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Repair_of_tv_radio_and_sound_equipt_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Rental_of_televisions_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Rental_of_televisions_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Personal_digital_audio_players_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Personal_digital_audio_players_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Satellite_dishes_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Satellite_dishes_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Exp_Termination_fee_for_car_trucklease_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Exp_Termination_fee_for_car_trucklease_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Exp_Gas_tank_repair_replacement_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Exp_Gas_tank_repair_replacement_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Exp_Value_.surrender._of_whole_life_insur_policy_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Exp_Value_.surrender._of_whole_life_insur_policy_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Exp_Watches_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Exp_Watches_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Exp_Coin_operated_apparel_laundry_dryclean_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Exp_Coin_operated_apparel_laundry_dryclean_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Exp_Clothing_rental_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Exp_Clothing_rental_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Exp_Watch_and_jewelry_repair_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Exp_Watch_and_jewelry_repair_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Exp_Vehicle_purchases_net_outlay_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Exp_Vehicle_purchases_net_outlay_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Exp_School_bus_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Exp_School_bus_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Exp_Medicare_payments_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Exp_Medicare_payments_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Exp_Long_term_care_insur_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Exp_Long_term_care_insur_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Exp_Care_in_convalescent_or_nursing_home_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Exp_Care_in_convalescent_or_nursing_home_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Exp_Medical_equip_for_general_use_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Exp_Medical_equip_for_general_use_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Exp_Supportive_and_convalescent_medical_equip_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Exp_Supportive_and_convalescent_medical_equip_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Exp_Unmotored_recreational_vehicles_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Exp_Unmotored_recreational_vehicles_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Exp_Boat_without_motor_and_boat_trailers_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Exp_Boat_without_motor_and_boat_trailers_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Exp_Trailer_and_OT_attachable_campers_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Exp_Trailer_and_OT_attachable_campers_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Exp_Global_positioning_system_devices_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Exp_Global_positioning_system_devices_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Exp_Fireworks_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Exp_Fireworks_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Exp_Visual_goods_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Exp_Visual_goods_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Exp_Wigs_and_hairpieces_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Exp_Wigs_and_hairpieces_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Exp_Expenses_for_OT_properties_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Exp_Expenses_for_OT_properties_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+
+ConsER_1215$Exp_CashContr_to_political_organizations_TotAmt_Rent_as_pay_TotAmt<-ConsER_1215$Exp_CashContr_to_political_organizations_TotAmt*ConsER_1215$Rent_as_pay_TotAmt
+```
+
+Split ER visits into train and test sets at a .80, 0.20 split ratio, respectively. 
+```{r}
+set.seed(70119)
+d_rf1 <- split_train_test(d = ConsER_1215[-1], outcome = TotER17Capita)
+train_set_rf1 <- d_rf1$train
+test_set_rf1 <- d_rf1$test
+```
+
+Turn train and test sets into matrices, as required by glmnet 
+```{r}
+#lasso training and test data turned into matrices 
+x_train1 <- model.matrix(TotER17Capita ~., train_set_rf1)
+x_test1 <- model.matrix(TotER17Capita~., test_set_rf1)
+```
+
+Run LASSO model 
+Note, convergence issues occurred with this model 
+```{r warning=FALSE}
+#run model
+lasso_model1 <- glmnet(x_train1, y= train_set_rf1$TotER17Capita, alpha = 1, family= "gaussian")
+cv.out1<- cv.glmnet(x_train1, y= train_set_rf1$TotER17Capita, alpha = 1, family= "gaussian")
+#lambda min
+(bestlam_lasso1 = cv.out1$lambda.min)
+#1 se from lambda min
+(selam_lasso1=cv.out1$lambda.1se)
+```
+
+Print model--these are coefficients to be retained in final machine learning modelling 
+```{r}
+#print model
+(test_un1<-coef(cv.out1, s=bestlam_lasso1))
+```
+
+Export non-zero coefficient variables for retention in future models 
+```{r}
+test_un1<-as.matrix(test_un1)
+test_un1<-as.data.frame(test_un1)
+#keep variables that have coefficient value>0 
+ER_Food_Coef_10.07<- subset(test_un1, test_un1["1"] > 0.000000e+00 | test_un1["1"] < 0.000000e+00 )
+```
+
+Repeat same process for Inpatient (IP) days 
+
+```{r}
+ConsIP_1215$Prepared_flour_mixes_TotDollar_Rent_TotAmt<-ConsIP_1215$Prepared_flour_mixes_TotDollar*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Sugar_TotDollar_Rent_TotAmt<-ConsIP_1215$Sugar_TotDollar*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Baby_food_TotDollar_Rent_TotAmt<-ConsIP_1215$Baby_food_TotDollar*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Nonalcoholic_beer_TotDollar_Rent_TotAmt<-ConsIP_1215$Nonalcoholic_beer_TotDollar*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Dinner_at_EmScCafe_TotDollar_Rent_TotAmt<-ConsIP_1215$Dinner_at_EmScCafe_TotDollar*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Breakfast_and_brunch_at_EmScCafe_TotDollar_Rent_TotAmt<-ConsIP_1215$Breakfast_and_brunch_at_EmScCafe_TotDollar*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$School_supplies_for_elementary_high_school_TotDollar_Rent_TotAmt<-ConsIP_1215$School_supplies_for_elementary_high_school_TotDollar*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$School_supplies_for_vocational_and_technical_schools_TotDollar_Rent_TotAmt<-ConsIP_1215$School_supplies_for_vocational_and_technical_schools_TotDollar*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$School_supplies_for_day_care_nursery_TotDollar_Rent_TotAmt<-ConsIP_1215$School_supplies_for_day_care_nursery_TotDollar*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Ground_rent_TotAmt_Rent_TotAmt<-ConsIP_1215$Ground_rent_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Rented_dwellings_TotAmt_Rent_TotAmt<-ConsIP_1215$Rented_dwellings_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Rent_as_pay_TotAmt_Rent_TotAmt<-ConsIP_1215$Rent_as_pay_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Tenants_insurance_TotAmt_Rent_TotAmt<-ConsIP_1215$Tenants_insurance_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Coal_wood_andOther_fuels_TotAmt_Rent_TotAmt<-ConsIP_1215$Coal_wood_andOther_fuels_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$HH_laundry_dryclean_not_coin.operated_TotAmt_Rent_TotAmt<-ConsIP_1215$HH_laundry_dryclean_not_coin.operated_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Computer_Installation_TotAmt_Rent_TotAmt<-ConsIP_1215$Computer_Installation_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Kitchen_dining_room_furn_TotAmt_Rent_TotAmt<-ConsIP_1215$Kitchen_dining_room_furn_TotAmt*ConsIP_1215$Rent_TotAmt 
+
+ConsIP_1215$Sewing_machines_TotAmt_Rent_TotAmt<-ConsIP_1215$Sewing_machines_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Flatware_TotAmt_Rent_TotAmt<-ConsIP_1215$Flatware_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Telephones_and_accessories_TotAmt_Rent_TotAmt<-ConsIP_1215$Telephones_and_accessories_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Office_furn_home_use_TotAmt_Rent_TotAmt<-ConsIP_1215$Office_furn_home_use_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Rental_of_furn_TotAmt_Rent_TotAmt<-ConsIP_1215$Rental_of_furn_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Mens_sportcoats_tailored_jackets_TotAmt_Rent_TotAmt<-ConsIP_1215$Mens_sportcoats_tailored_jackets_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Boys_2_15_TotAmt_Rent_TotAmt<-ConsIP_1215$Boys_2_15_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Boys_accessories_TotAmt_Rent_TotAmt<-ConsIP_1215$Boys_accessories_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Boys_suits_sportcoats_vests_TotAmt_Rent_TotAmt<-ConsIP_1215$Boys_suits_sportcoats_vests_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Boys_pants_and_shorts_TotAmt_Rent_TotAmt<-ConsIP_1215$Boys_pants_and_shorts_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Womens_uniforms_TotAmt_Rent_TotAmt<-ConsIP_1215$Womens_uniforms_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Girlscoats_and_jackets_TotAmt_Rent_TotAmt<-ConsIP_1215$Girlscoats_and_jackets_TotAmt*ConsIP_1215$Rent_TotAmt 
+
+ConsIP_1215$Girlshosiery_TotAmt_Rent_TotAmt<-ConsIP_1215$Girlshosiery_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Infant_coat_jacket_snowsuit_TotAmt_Rent_TotAmt<-ConsIP_1215$Infant_coat_jacket_snowsuit_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Infant_nightwear_loungewear_TotAmt_Rent_TotAmt<-ConsIP_1215$Infant_nightwear_loungewear_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Boys_footwear_TotAmt_Rent_TotAmt<-ConsIP_1215$Boys_footwear_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$VCRs_and_video_disc_players_TotAmt_Rent_TotAmt<-ConsIP_1215$VCRs_and_video_disc_players_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Repair_of_tv_radio_and_sound_equipt_TotAmt_Rent_TotAmt<-ConsIP_1215$Repair_of_tv_radio_and_sound_equipt_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Rental_of_televisions_TotAmt_Rent_TotAmt<-ConsIP_1215$Rental_of_televisions_TotAmt*ConsIP_1215$Rental_of_televisions_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Exp_Termination_fee_for_car_trucklease_TotAmt_Rent_TotAmt<-ConsIP_1215$Exp_Termination_fee_for_car_trucklease_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Exp_Trade_in_allowance_for_car_trucklease_TotAmt_Rent_TotAmt<-ConsIP_1215$Exp_Trade_in_allowance_for_car_trucklease_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Exp_Gas_tank_repair_replacement_TotAmt_Rent_TotAmt<-ConsIP_1215$Exp_Gas_tank_repair_replacement_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Exp_Watches_TotAmt_Rent_TotAmt<-ConsIP_1215$Exp_Watches_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Exp_Coin_operated_apparel_laundry_dryclean_TotAmt_Rent_TotAmt<-ConsIP_1215$Exp_Coin_operated_apparel_laundry_dryclean_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Exp_Apparel_laundry_dryclean_not_coin.operated_TotAmt_Rent_TotAmt<-ConsIP_1215$Exp_Apparel_laundry_dryclean_not_coin.operated_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Exp_New_motorcycles_TotAmt_Rent_TotAmt<-ConsIP_1215$Exp_New_motorcycles_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Exp_Towing_charges_TotAmt_Rent_TotAmt<-ConsIP_1215$Exp_Towing_charges_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Exp_Intracity_mass_transit_fares_TotAmt_Rent_TotAmt<-ConsIP_1215$Exp_Intracity_mass_transit_fares_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Exp_Medicare_prescription_drug_premium_TotAmt_Rent_TotAmt<-ConsIP_1215$Exp_Medicare_prescription_drug_premium_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Exp_Commercial_medicare_supp_not_blue_cross_TotAmt_Rent_TotAmt<-ConsIP_1215$Exp_Commercial_medicare_supp_not_blue_cross_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Exp_Medical_equip_for_general_use_TotAmt_Rent_TotAmt<-ConsIP_1215$Exp_Medical_equip_for_general_use_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Exp_Rental_of_medical_equip_TotAmt_Rent_TotAmt<-ConsIP_1215$Exp_Rental_of_medical_equip_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Exp_Rental_of_supportive_convalescent_medical_equip_TotAmt_Rent_TotAmt<-ConsIP_1215$Exp_Rental_of_supportive_convalescent_medical_equip_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Exp_Purchase_of_boat_with_motor_TotAmt_Rent_TotAmt<-ConsIP_1215$Exp_Purchase_of_boat_with_motor_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Exp_Souvenirs_TotAmt_Rent_TotAmt<-ConsIP_1215$Exp_Souvenirs_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Exp_Pinball_electronic_video_games_TotAmt_Rent_TotAmt<-ConsIP_1215$Exp_Pinball_electronic_video_games_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Exp_Wigs_and_hairpieces_TotAmt_Rent_TotAmt<-ConsIP_1215$Exp_Wigs_and_hairpieces_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Exp_Electric_personal_care_appliances_TotAmt_Rent_TotAmt<-ConsIP_1215$Exp_Electric_personal_care_appliances_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Exp_Dating_sers_TotAmt_Rent_TotAmt<-ConsIP_1215$Exp_Dating_sers_TotAmt*ConsIP_1215$Rent_TotAmt
+
+ConsIP_1215$Exp_Gift_to_nonCU_members_of_stock_bond_mutual_TotAmt_Rent_TotAmt<-ConsIP_1215$Exp_Gift_to_nonCU_members_of_stock_bond_mutual_TotAmt*ConsIP_1215$Rent_TotAmt
+```
+
+
+Split IP days into train and test sets at a .80, 0.20 split ratio, respectively. 
+```{r}
+set.seed(70119)
+d_rf1 <- split_train_test(d = ConsIP_1215[-1], outcome = InpDay17Capita)
+train_set_rf1 <- d_rf1$train
+test_set_rf1 <- d_rf1$test
+```
+
+Turn train and test sets into matrices, as required by glmnet 
+```{r}
+#lasso training and test data turned into matrices 
+x_train1 <- model.matrix(InpDay17Capita ~., train_set_rf1)
+x_test1 <- model.matrix(InpDay17Capita~., test_set_rf1)
+```
+
+Run LASSO model 
+```{r}
+#run model
+lasso_model1 <- glmnet(x_train1, y= train_set_rf1$InpDay17Capita, alpha = 1, family= "gaussian")
+cv.out1<- cv.glmnet(x_train1, y= train_set_rf1$InpDay17Capita, alpha = 1, family= "gaussian")
+#lambda min
+(bestlam_lasso1 = cv.out1$lambda.min)
+#1 se from lambda min
+(selam_lasso1=cv.out1$lambda.1se)
+```
+
+Print model--these are coefficients to be retained in final machine learning modelling 
+```{r}
+#print model
+(test_un1<-coef(cv.out1, s=bestlam_lasso1))
+```
+
+Export non-zero coefficient variables for retention in future models 
+```{r}
+test_un1<-as.matrix(test_un1)
+test_un1<-as.data.frame(test_un1)
+#keep variables that have coefficient value>0 
+IP_Food_Coef_10.07<- subset(test_un1, test_un1["1"] > 0.000000e+00 | test_un1["1"] < 0.000000e+00 )
+```
+
+Repeat for hospital expenditures 
+
+Generate second order terms previously identified 
+```{r}
+ConsExp_1215$Rice_TotDollar_Tenants_insurance_TotAmt<-ConsExp_1215$Rice_TotDollar*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Lamb_organ_meats_and_others_TotDollar_Tenants_insurance_TotAmt<-ConsExp_1215$Lamb_organ_meats_and_others_TotDollar*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Baby_food_TotDollar_Tenants_insurance_TotAmt<-ConsExp_1215$Baby_food_TotDollar*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Nonalcoholic_beer_TotDollar_Tenants_insurance_TotAmt<-ConsExp_1215$Nonalcoholic_beer_TotDollar*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Lunch_at_VendMobile_TotDollar_Tenants_insurance_TotAmt<-ConsExp_1215$Lunch_at_VendMobile_TotDollar*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Dinner_at_EmScCafe_TotDollar_Tenants_insurance_TotAmt<-ConsExp_1215$Dinner_at_EmScCafe_TotDollar*ConsER_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Snack_nonalcoholic_bev_at_Rest_TotDollar_Tenants_insurance_TotAmt<-ConsExp_1215$Snack_nonalcoholic_bev_at_Rest_TotDollar*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Breakfast_and_brunch_at_EmScCafe_TotDollar_Tenants_insurance_TotAmt<-ConsExp_1215$Breakfast_and_brunch_at_EmScCafe_TotDollar*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Meals_as_pay_TotDollar_Tenants_insurance_TotAmt<-ConsExp_1215$Meals_as_pay_TotDollar*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Other_alcoholic_bev_away_TotDollar_Tenants_insurance_TotAmt<-ConsExp_1215$Other_alcoholic_bev_away_TotDollar*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$College_tuition_TotDollar_Tenants_insurance_TotAmt<-ConsExp_1215$College_tuition_TotDollar*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$School_supplies_for_college_TotDollar_Tenants_insurance_TotAmt<-ConsExp_1215$School_supplies_for_college_TotDollar*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$School_supplies_for_vocational_and_technical_schools_TotDollar_Tenants_insurance_TotAmt<-ConsExp_1215$School_supplies_for_vocational_and_technical_schools_TotDollar*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$School_supplies_for_day_care_nursery_TotDollar_Tenants_insurance_TotAmt<-ConsExp_1215$School_supplies_for_day_care_nursery_TotDollar*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Mortgage_interest_and_charges_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Mortgage_interest_and_charges_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Interest_paid_home_equity_loan_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Interest_paid_home_equity_loan_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Ground_rent_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Ground_rent_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Rented_dwellings_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Rented_dwellings_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Rent_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Rent_as_pay_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt 
+
+ConsExp_1215$Main_insurance_andOther_exp_Rented_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Main_insurance_andOther_exp_Rented_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Coin.operated_HH_laundry_dryclean_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Coin.operated_HH_laundry_dryclean_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Computer_Installation_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Computer_Installation_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Infantsequipt_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Infantsequipt_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Mens_sportcoats_tailored_jackets_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Mens_sportcoats_tailored_jackets_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Boys_nightwear_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Boys_nightwear_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Boys_hosiery_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Boys_hosiery_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Boys_accessories_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Boys_accessories_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Boys_pants_and_shorts_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Boys_pants_and_shorts_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Womens_sportcoats_tailored_jackets_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Womens_sportcoats_tailored_jackets_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Girlsunderwear_and_sleepwear_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Girlsunderwear_and_sleepwear_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Girlshosiery_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Girlshosiery_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Girlsuniforms_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Girlsuniforms_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Infant_dresses_outerwear_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Infant_dresses_outerwear_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Infant_nightwear_loungewear_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Infant_nightwear_loungewear_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Boys_footwear_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Boys_footwear_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Girlsfootwear_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Girlsfootwear_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Sound_equipt_accessories_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Sound_equipt_accessories_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Repair_of_tv_radio_and_sound_equipt_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Repair_of_tv_radio_and_sound_equipt_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Rental_of_televisions_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Rental_of_televisions_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Exp_Extra_fees_for_car_trucklease_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Exp_Extra_fees_for_car_trucklease_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Exp_Gas_tank_repair_replacement_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Exp_Gas_tank_repair_replacement_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Exp_Value_.surrender._of_whole_life_insur_policy_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Exp_Value_.surrender._of_whole_life_insur_policy_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Exp_Apparel_laundry_dryclean_not_coin.operated_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Exp_Apparel_laundry_dryclean_not_coin.operated_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Exp_Parking_fees_in_home_city_excluding_residence_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Exp_Parking_fees_in_home_city_excluding_residence_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Exp_Taxi_fares_and_limousine_sers_on_trips_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Exp_Taxi_fares_and_limousine_sers_on_trips_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Exp_Adult_diapers_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Exp_Adult_diapers_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Exp_Global_positioning_system_devices_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Exp_Global_positioning_system_devices_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Exp_OT_photographic_supplies_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Exp_OT_photographic_supplies_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Exp_Fireworks_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Exp_Fireworks_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Exp_Pinball_electronic_video_games_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Exp_Pinball_electronic_video_games_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Exp_Wigs_and_hairpieces_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Exp_Wigs_and_hairpieces_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Exp_Dating_sers_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Exp_Dating_sers_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Exp_Vacation_clubs_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Exp_Vacation_clubs_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt
+
+ConsExp_1215$Exp_CashContr_to_educational_institutions_TotAmt_Tenants_insurance_TotAmt<-ConsExp_1215$Exp_CashContr_to_educational_institutions_TotAmt*ConsExp_1215$Tenants_insurance_TotAmt
+```
+
+Split Hospital per capita visits into train and test sets at a .80, 0.20 split ratio, respectively. 
+```{r}
+set.seed(70119)
+d_rf1 <- split_train_test(d = ConsExp_1215[-1], outcome = HosExpCapita)
+train_set_rf1 <- d_rf1$train
+test_set_rf1 <- d_rf1$test
+```
+
+Turn train and test sets into matrices, as required by glmnet 
+```{r}
+#lasso training and test data turned into matrices 
+x_train1 <- model.matrix(HosExpCapita ~., train_set_rf1)
+x_test1 <- model.matrix(HosExpCapita~., test_set_rf1)
+```
+
+Run LASSO model 
+
+```{r warning=FALSE}
+#run model
+lasso_model1 <- glmnet(x_train1, y= train_set_rf1$HosExpCapita, alpha = 1, family= "gaussian")
+cv.out1<- cv.glmnet(x_train1, y= train_set_rf1$HosExpCapita, alpha = 1, family= "gaussian")
+#lambda min
+(bestlam_lasso1 = cv.out1$lambda.min)
+#1 se from lambda min
+(selam_lasso1=cv.out1$lambda.1se)
+```
+
+Print model--these are coefficients to be retained in final machine learning modelling 
+```{r}
+#print model
+(test_un1<-coef(cv.out1, s=bestlam_lasso1))
+```
+
+Export non-zero coefficient variables for retention in future models 
+```{r}
+test_un1<-as.matrix(test_un1)
+test_un1<-as.data.frame(test_un1)
+#keep variables that have coefficient value>0 
+Exp_Food_Coef_10.07<- subset(test_un1, test_un1["1"] > 0.000000e+00 | test_un1["1"] < 0.000000e+00 )
+```
+
+#### Save data with second order terms 
+Full path is masked but will align with other code dependencies 
+```{r}
+#demographics rename 
+Demo1ERa_12.15a<-Demo1ER_1215
+Demo1IPa_12.15a<-Demo1IP_1215
+Demo1Expa_12.15a<-Demo1Exp_1215
+
+#demographics save 
+save(Demo1ERa_12.15a, file="~/County/CandidateExposures/Demo1ERa_12.15a.Rda")
+save(Demo1IPa_12.15a, file="~/County/CandidateExposures/Demo1IPa_12.15a.Rda")
+save(Demo1Expa_12.15a, file="~/County/CandidateExposures/Demo1Expa_12.15a.Rda")
+
+#adult & child disease rename 
+DxHealthER_12.15a<-DxHealthER_1215
+DxHealthIP_12.15a<-DxHealthIP_1215
+DxHealthExp_12.15a<-DxHealthExp_1215
+
+#adult & child disease save 
+save(DxHealthER_12.15a, file="~/County/CandidateExposures/DxHealthER_12.15a.Rda")
+save(DxHealthIP_12.15a, file="~/County/CandidateExposures/DxHealthIP_12.15a.Rda")
+save(DxHealthExp_12.15a, file="~/County/CandidateExposures/DxHealthExp_12.15a.Rda")
+
+#community factors rename
+CommER_12.15a<-CommER_1215
+CommIP_12.15a<-CommIP_1215
+CommExp_12.15a<-CommExp_1215
+
+#save community factor 
+save(CommER_12.15a, file="~/County/CandidateExposures/CommER_12.15a.Rda")
+save(CommIP_12.15a, file="~/County/CandidateExposures/CommIP_12.15a.Rda")
+save(CommExp_12.15a, file="~/County/CandidateExposures/CommExp_12.15a.Rda")
+
+#consumer purchases rename 
+ConsER_12.15a<-ConsER_1215
+ConsIP_12.15a<-ConsIP_1215
+ConsExp_12.15a<-ConsExp_1215
+
+#save consumer purchase 
+save(ConsER_12.15a, file="~/County/CandidateExposures/ConsER_12.15a.Rda")
+save(ConsIP_12.15a, file="~/County/CandidateExposures/ConsIP_12.15a.Rda")
+save(ConsExp_12.15a, file="~/County/CandidateExposures/ConsExp_12.15a.Rda")
+```
+
+#### Save coefficient outputs 
+```{r}
+save(ER_Demo_Coef_10.07, file="~/County/Model/ER_Demo_Coef_10.07.Rda")
+save(IP_Demo_Coef_10.07, file="~/County/Model/IP_Demo_Coef_10.07.Rda")
+save(Exp_Demo_Coef_10.07, file="~/County/Model/Exp_Demo_Coef_10.07.Rda")
+
+save(ER_Adult_Coef_10.07, file="~/County/Model/ER_Adult_Coef_10.07.Rda")
+save(IP_Adult_Coef_10.07, file="~County/Model/IP_Adult_Coef_10.07.Rda")
+save(Exp_Adult_Coef_10.07, file="~/County/Model/Exp_Adult_Coef_10.07.Rda")
+
+save(ER_Employ_Coef_10.07, file="~/County/Model/ER_Employ_Coef_10.07.Rda")
+save(IP_Employ_Coef_10.07, file="~/County/Model/IP_Employ_Coef_10.07.Rda")
+save(Exp_Employ_Coef_10.07, file="~/County/Model/Exp_Employ_Coef_10.07.Rda")
+
+save(ER_Food_Coef_10.07, file="~/County/Model/ER_Food_Coef_10.07.Rda")
+save(IP_Food_Coef_10.07, file="~/County/Model/IP_Food_Coef_10.07.Rda")
+save(Exp_Food_Coef_10.07, file="~/County/Model/Exp_Food_Coef_10.07.Rda")
+```
