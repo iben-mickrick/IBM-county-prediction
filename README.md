@@ -7,7 +7,8 @@ Feature selection methods were undertaken to select the most important features 
 The code included herein includes the machine learning model development and post-model evaluation. The code is broken into several pieces for organizational ease. The pieces include:<br/>
 
 (1) Model preparation.Rmd: this covers second order term identification, and feature selection <br/>
-(2) Modelling part 1.Rmd: this covers the iterative and systematic machine learning pipeline for iterations 1a, 1b, 1c, 1d, 2a, 2b, 2c, and 2d <br/>
-(3) Modelling part 2.Rmd: this covers the iterative and systematic machine learning pipeline for iterations 3a, 3b, 3c, 3d, 3e, and 3f <br/>
-(4) Modelling part 3.Rmd: this covers the iterative and systematic machine learning pipeline for iterations 4a, 4b, 4c, and 4d <br/>
-(5) Post model evaluation.Rmd: this covers post model evaluation, including calibration assessement and SHAP value analysis <br/>
+(2) Modelling part 1.Rmd: this covers the iterative and systematic machine learning pipeline for iteration 1 <br/>
+(3) Modelling part 2.Rmd: this covers the iterative and systematic machine learning pipeline for iteration 2 <br/>
+(4) Modelling part 3.Rmd: this covers the iterative and systematic machine learning pipeline for iteration 3 <br/>
+(5) Modelling part 4.Rmd: this covers the iterative and systematic machine learning pipeline for iteration 4 <br/>
+(6) Post model evaluation.Rmd: this covers post model evaluation, including calibration assessement and SHAP value analysis <br/>
