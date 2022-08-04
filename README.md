@@ -1,4 +1,5 @@
-# Predicting Resource Intensive Healthcare (RIHC)
+# Predicting Resource Intensive Healthcare (RIHC) <br/>
+
 
 This objective of this study was to develop models predicting 3-outcome metrics of RIHC among U.S. counties using routinely collected governmental data. The 3-outcome metrics of RIHC included: (1) emergency room visits, (2) inpatient days, and (3) hospital expenditures. Data on the outcome metrics was obtained from the American Hospital Association Survey, available from the Health Resources Services Administration. Candidate features came from four broad groups, including: (1) demographics from the U.S. Census Bureau, (2) adult and child health characteristics from the Centers for Disease Control and Prevention, (3) community characteristics from the American Community Survey, and (4) consumer expenditures from the Bureau of Labor Statistics. 
 
