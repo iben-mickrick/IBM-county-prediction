@@ -1,0 +1,5646 @@
+---
+title: "County Modelling"
+author: "Iben M. Ricket"
+date: "9/7/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#County Modelling Part 2
+Feature selection was applied to identify the most important variables to retain in predictive modelling. The code that follows in this document will implement five machine learning prediction models. These include (1) linear regression, (2) LASSO,(3)random forest, and (4) gradient boosting. The goal of this analysis is to identify the most important variables for predicting three unique outcomes of super utilization (i.e. number of ER visits per capita, number of inpatient days per capita and hospital expenditures per capita). 
+
+An interative model development approach will be employed, which will allow for the systematic evaluation of data inputs, variable selection techniques, and machine learning algorithms. The two variable selection techniques were previously employed and generated 10 unique feautre sets--2 per candidate variable domain (i.e. demographics, disease/health status, community, and consumer goods). The 2 unique feature sets will be fed into five unique machine learning models listed above. Each model will generate performance metrics and the model with the lowest MSE will be documented. This entire process will be repeated for each feature set identified in the feature selection procedure.  
+
+The code below is for iteration 2 and it contains 6 subparts (iteration 2a, 2b, 2c 2d, 2e, and 2f)
+
+Libraries needed to support analysis 
+```{r message=FALSE, warning=FALSE}
+library(healthcareai)
+library(dplyr)
+library(glmnet)
+library(pROC)
+library(caret)
+library(ROCR)
+library(generalhoslem)
+library(ResourceSelection)
+library(PredictABEL)
+library(ROCR)
+library(SDMTools)
+library(randomForest)
+library(arsenal)
+library(sqldf)
+library(tidyverse)
+library(DAAG)
+library(sl3)
+library(gridExtra)
+```
+
+Generate learners for each type of Machine Learning Model 
+```{r}
+lrnr_glm<-Lrnr_glm$new()
+glmnet_learner<-Lrnr_glmnet$new()
+rf_learner<-Lrnr_randomForest$new()
+gb_learner<-Lrnr_gbm$new()
+```
+
+#Iteration 2. Two way combinations of features selected across 4 domains 
+
+```{r}
+#adult & child disease and health status (original)
+load(file="~/County/CandidateExposures/DxHealthER_12.15a.Rda")
+load(file="~/County/CandidateExposures/DxHealthIP_12.15a.Rda")
+load(file="~/County/CandidateExposures/DxHealthExp_12.15a.Rda")
+
+#demographic (original)
+load(file="~/County/CandidateExposures/Demo1ERa_12.15a.Rda")
+load(file="/~/County/CandidateExposures/Demo1IPa_12.15a.Rda")
+load(file="~/County/CandidateExposures/Demo1Expa_12.15a.Rda")
+
+#LASSO demographics coefficients 
+load(file="~/County/Model/ER_Demo_Coef_10.07.Rda")
+load(file="~/County/Model/IP_Demo_Coef_10.07.Rda")
+load(file="~/County/Model/Exp_Demo_Coef_10.07.Rda")
+
+#LASSO disease and health status coefficients 
+load(file="~/County/Model/ER_Adult_Coef_10.07.Rda")
+load(file="~/County/Model/IP_Adult_Coef_10.07.Rda")
+load(file="~/County/Model/Exp_Adult_Coef_10.07.Rda")
+
+#Random Forest Demographic variable importance 
+load(file="~/County/Model/ER_Demo_Var_10.07.Rda")
+load(file="~/County/Model/IP_Demo_Var_10.07.Rda")
+load(file="~/County/Model/HosExp_Demo_Var_10.07.Rda")
+
+#Random Forest disease and health status variable importance 
+load(file="~/County/Model/ER_Adult_Var_10.07.Rda")
+load(file="~/County/Model/IP_Adult_Var_10.07.Rda")
+load(file="~/County/Model/HosExp_Adult_Var_10.07.Rda")
+```
+
+Change name of AllCounties in demographic files to All_Counties, to ensure proper merge on the variable
+```{r}
+names(Demo1ERa_12.15a)[names(Demo1ERa_12.15a) == 'AllCounties'] <- 'All_Counties'
+names(Demo1IPa_12.15a)[names(Demo1IPa_12.15a) == 'AllCounties'] <- 'All_Counties'
+names(Demo1Expa_12.15a)[names(Demo1Expa_12.15a) == 'AllCounties'] <- 'All_Counties'
+```
+
+Merge demographics & disease/health status data 
+```{r}
+#ER Visits 
+DemoDxER<-merge(Demo1ERa_12.15a, DxHealthER_12.15a, by="All_Counties")
+#Drop extra outcome generated from merge 
+DemoDxER<-DemoDxER[-c(151)]
+#rename outcome
+names(DemoDxER)[names(DemoDxER)=="TotER17Capita.y"] <- "TotER17Capita"
+
+#IP visits 
+DemoDxIP<-merge(Demo1IPa_12.15a, DxHealthIP_12.15a, by="All_Counties")
+#Drop extra outcome generated from merge 
+DemoDxIP<-DemoDxIP[-c(151)]
+#rename outcome
+names(DemoDxIP)[names(DemoDxIP)=="InpDay17Capita.y"] <- "InpDay17Capita"
+
+#Hospital expenditures 
+DemoDxExp<-merge(Demo1Expa_12.15a, DxHealthExp_12.15a, by="All_Counties")
+#Drop extra outcome generated from merge 
+DemoDxExp<-DemoDxExp[-c(151)]
+#rename outcome
+names(DemoDxExp)[names(DemoDxExp)=="HosExpCapita.y"] <- "HosExpCapita"
+```
+
+Subset demographic + disease/health status variables to include only those selected by LASSO models 
+```{r}
+#ER  visits 
+rownames(ER_Demo_Coef_10.07)[rownames(ER_Demo_Coef_10.07) == "X.Intercept."] = "TotER17Capita"
+ER_Demo_Coef_10.07<-rownames(ER_Demo_Coef_10.07)
+rownames(ER_Adult_Coef_10.07)[rownames(ER_Adult_Coef_10.07) == "X.Intercept."] = "TotER17Capita"
+ER_Adult_Coef_10.07<-rownames(ER_Adult_Coef_10.07)
+
+#combine coefficient rownames 
+ERDx<-c(ER_Demo_Coef_10.07, ER_Adult_Coef_10.07, "All_Counties")
+
+col.num <- which(colnames(DemoDxER) %in% ERDx )
+DemoDxER_LASSOa<-DemoDxER[c(col.num)]
+
+#IP Days 
+rownames(IP_Demo_Coef_10.07)[rownames(IP_Demo_Coef_10.07) == "X.Intercept."] = "InpDay17Capita"
+IP_Demo_Coef_10.07<-rownames(IP_Demo_Coef_10.07)
+rownames(IP_Adult_Coef_10.07)[rownames(IP_Adult_Coef_10.07) == "X.Intercept."] = "InpDay17Capita"
+IP_Adult_Coef_10.07<-rownames(IP_Adult_Coef_10.07)
+
+#combine coefficient rownames 
+IPDx<-c(IP_Demo_Coef_10.07, IP_Adult_Coef_10.07, "All_Counties")
+
+col.num <- which(colnames(DemoDxIP) %in% IPDx)
+DemoDxIP_LASSOa<-DemoDxIP[c(col.num)]
+
+#Hospital expenditures 
+Exp_Demo_Coef_10.07<-rownames(Exp_Demo_Coef_10.07)
+Exp_Demo_Coef_10.07<-c(Exp_Demo_Coef_10.07, "HosExpCapita")
+Exp_Adult_Coef_10.07<-rownames(Exp_Adult_Coef_10.07)
+
+ExpDx<-c(Exp_Demo_Coef_10.07, Exp_Adult_Coef_10.07, "All_Counties")
+
+col.num <- which(colnames(DemoDxExp) %in% ExpDx)
+DemoDxExp_LASSOa<-DemoDxExp[c(col.num)]
+```
+
+Remove second order terms from DemoDxER
+```{r}
+DemoDxER_noi<-DemoDxER[-c(151:165, 313:327)]
+DemoDxIP_noi<-DemoDxIP[-c(151:165, 313:327)]
+DemoDxExp_noi<-DemoDxExp[-c(151:165, 313:327)]
+```
+
+Subset demographic + disease/health status variables to include only those selected by Random Forest models 
+```{r}
+#ER Visits 
+ER_Demo_Var_10.07<-rownames(ER_Demo_Var_10.07)
+ER_Demo_Var_10.07<-c(ER_Demo_Var_10.07, "TotER17Capita")
+ER_Adult_Var_10.07<-rownames(ER_Adult_Var_10.07)
+
+ERDx_RF<-c(ER_Demo_Var_10.07, ER_Adult_Var_10.07, "All_Counties")
+
+col.num <- which(colnames(DemoDxER_noi) %in% ERDx_RF )
+DemoDxER_RF<-DemoDxER_noi[c(col.num)]
+
+#IP Visits 
+IP_Demo_Var_10.07<-rownames(IP_Demo_Var_10.07)
+IP_Demo_Var_10.07<-c(IP_Demo_Var_10.07, "InpDay17Capita")
+IP_Adult_Var_10.07<-rownames(IP_Adult_Var_10.07)
+
+IPDx_RF<-c(IP_Demo_Var_10.07, IP_Adult_Var_10.07, "All_Counties")
+
+col.num <- which(colnames(DemoDxIP_noi) %in% IPDx_RF )
+DemoDxIP_RF<-DemoDxIP_noi[c(col.num)]
+
+#Hospital expenditures 
+HosExp_Demo_Var_10.07<-rownames(HosExp_Demo_Var_10.07)
+HosExp_Demo_Var_10.07<-c(HosExp_Demo_Var_10.07, "HosExpCapita")
+HosExp_Adult_Var_10.07<-rownames(HosExp_Adult_Var_10.07)
+
+ExpDx_RF<-c(HosExp_Demo_Var_10.07, HosExp_Adult_Var_10.07, "All_Counties")
+
+col.num <- which(colnames(DemoDxExp_noi) %in% ExpDx_RF )
+DemoDxExp_RF<-DemoDxExp_noi[c(col.num)]
+
+```
+
+
+## Iteration 2a. Demographic and Disease/health status variables selected from LASSO 
+
+###ER visits w/ features selected from LASSO
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxER_LASSOa$TotER17Capita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxER_LASSOa)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+ER_Demo_Train <- sl3_Task$new(
+  data = DemoDxER_LASSOa[-1][trn_indx, ],
+  covariates = colnames(DemoDxER_LASSOa)[-c(1,53)],
+  outcome = colnames(DemoDxER_LASSOa)[53],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+ER_Demo_Test <- sl3_Task$new(
+  data = DemoDxER_LASSOa[-1][tst_indx, ],
+  covariates = colnames(DemoDxER_LASSOa)[-c(1,53)],
+  outcome = colnames(DemoDxER_LASSOa)[53],
+  outcome_type = "continuous"
+)
+
+ER_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(lrnr_glm, glmnet_learner)
+stack_fit<-learner_stack$train(ER_Demo_Train)
+
+stack_preds<-stack_fit$predict(ER_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(ER_Demo_Train)
+cv_preds<-cv_fit$predict(ER_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_glm_TRUE
+actualLM <- DemoDxER_LASSOa$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE
+actualLM <- DemoDxER_LASSOa$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE 
+```{r}
+#GLM model 
+mean((cv_preds$Lrnr_glm_TRUE - DemoDxER_LASSOa$TotER17Capita[tst_indx])^2)
+#GLMNET 
+mean((cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE - DemoDxER_LASSOa$TotER17Capita[tst_indx])^2)
+```
+
+Remove second order terms, will be used to run nonparametric models
+```{r}
+DemoDxER_LASSOa<-DemoDxER_LASSOa[-c(35:37, 54)]
+```
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxER_LASSOa$TotER17Capita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxER_LASSOa)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+ER_Demo_Train <- sl3_Task$new(
+  data = DemoDxER_LASSOa[-1][trn_indx, ],
+  covariates = colnames(DemoDxER_LASSOa)[-c(1,50)],
+  outcome = colnames(DemoDxER_LASSOa)[50],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+ER_Demo_Test <- sl3_Task$new(
+  data = DemoDxER_LASSOa[-1][tst_indx, ],
+  covariates = colnames(DemoDxER_LASSOa)[-c(1,50)],
+  outcome = colnames(DemoDxER_LASSOa)[50],
+  outcome_type = "continuous"
+)
+
+ER_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(rf_learner, gb_learner)
+stack_fit<-learner_stack$train(ER_Demo_Train)
+
+stack_preds<-stack_fit$predict(ER_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(ER_Demo_Train)
+cv_preds<-cv_fit$predict(ER_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#RF Model 
+predsLM <- cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE
+actualLM <- DemoDxER_LASSOa$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GBM Model 
+predsLM <- cv_preds$Lrnr_gbm_10000_2_0.001
+actualLM <- DemoDxER_LASSOa$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE
+```{r}
+#Random Forest 
+mean((cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE - DemoDxER_LASSOa$TotER17Capita[tst_indx])^2)
+#GBM
+mean((cv_preds$Lrnr_gbm_10000_2_0.001 - DemoDxER_LASSOa$TotER17Capita[tst_indx])^2)
+```
+
+###IP Days w/ features selected from LASSO
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxIP_LASSOa$InpDay17Capita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxIP_LASSOa)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+IP_Demo_Train <- sl3_Task$new(
+  data = DemoDxIP_LASSOa[-1][trn_indx, ],
+  covariates = colnames(DemoDxIP_LASSOa)[-c(1,81)],
+  outcome = colnames(DemoDxIP_LASSOa)[81],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+IP_Demo_Test <- sl3_Task$new(
+  data = DemoDxIP_LASSOa[-1][tst_indx, ],
+  covariates = colnames(DemoDxIP_LASSOa)[-c(1,81)],
+  outcome = colnames(DemoDxIP_LASSOa)[81],
+  outcome_type = "continuous"
+)
+
+IP_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(lrnr_glm, glmnet_learner)
+stack_fit<-learner_stack$train(IP_Demo_Train)
+
+stack_preds<-stack_fit$predict(IP_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(IP_Demo_Train)
+cv_preds<-cv_fit$predict(IP_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_glm_TRUE
+actualLM <- DemoDxIP_LASSOa$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE
+actualLM <- DemoDxIP_LASSOa$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE 
+```{r}
+#GLM model 
+mean((cv_preds$Lrnr_glm_TRUE - DemoDxIP_LASSOa$InpDay17Capita[tst_indx])^2)
+#GLMNET 
+mean((cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE - DemoDxIP_LASSOa$InpDay17Capita[tst_indx])^2)
+```
+
+Remove second order terms and run nonparametric models 
+```{r}
+DemoDxIP_LASSOa<-DemoDxIP_LASSOa[-c(49:53, 82)]
+```
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxIP_LASSOa$InpDay17Capita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxIP_LASSOa)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+IP_Demo_Train <- sl3_Task$new(
+  data = DemoDxIP_LASSOa[-1][trn_indx, ],
+  covariates = colnames(DemoDxIP_LASSOa)[-c(1,76)],
+  outcome = colnames(DemoDxIP_LASSOa)[76],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+IP_Demo_Test <- sl3_Task$new(
+  data = DemoDxIP_LASSOa[-1][tst_indx, ],
+  covariates = colnames(DemoDxIP_LASSOa)[-c(1,76)],
+  outcome = colnames(DemoDxIP_LASSOa)[76],
+  outcome_type = "continuous"
+)
+
+IP_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(rf_learner, gb_learner)
+stack_fit<-learner_stack$train(IP_Demo_Train)
+
+stack_preds<-stack_fit$predict(IP_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(IP_Demo_Train)
+cv_preds<-cv_fit$predict(IP_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE
+actualLM <- DemoDxIP_LASSOa$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_gbm_10000_2_0.001
+actualLM <- DemoDxIP_LASSOa$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE
+```{r}
+#Random Forest 
+mean((cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE - DemoDxIP_LASSOa$InpDay17Capita[tst_indx])^2)
+#GBM
+mean((cv_preds$Lrnr_gbm_10000_2_0.001 - DemoDxIP_LASSOa$InpDay17Capita[tst_indx])^2)
+```
+
+###Hospital expenditures w features selected from LASSO
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxExp_LASSOa$HosExpCapita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxExp_LASSOa)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+Exp_Demo_Train <- sl3_Task$new(
+  data = DemoDxExp_LASSOa[-1][trn_indx, ],
+  covariates = colnames(DemoDxExp_LASSOa)[-c(1, 106)],
+  outcome = colnames(DemoDxExp_LASSOa)[106],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+Exp_Demo_Test <- sl3_Task$new(
+  data = DemoDxExp_LASSOa[-1][tst_indx, ],
+  covariates = colnames(DemoDxExp_LASSOa)[-c(1,106)],
+  outcome = colnames(DemoDxExp_LASSOa)[106],
+  outcome_type = "continuous"
+)
+
+Exp_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(lrnr_glm, glmnet_learner)
+stack_fit<-learner_stack$train(Exp_Demo_Train)
+
+stack_preds<-stack_fit$predict(Exp_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(Exp_Demo_Train)
+cv_preds<-cv_fit$predict(Exp_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_glm_TRUE
+actualLM <- DemoDxIP_LASSOa$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE
+actualLM <- DemoDxIP_LASSOa$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE 
+```{r}
+#GLM model 
+mean((cv_preds$Lrnr_glm_TRUE - DemoDxExp_LASSOa$HosExpCapita[tst_indx])^2)
+#GLMNET 
+mean((cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE - DemoDxExp_LASSOa$HosExpCapita[tst_indx])^2)
+```
+
+Remove second order terms and run nonparametrics models
+```{r}
+DemoDxExp_LASSOa<-DemoDxExp_LASSOa[-c(66:71, 107)]
+```
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70130)
+trn_indx <- createDataPartition(DemoDxExp_LASSOa$HosExpCapita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxExp_LASSOa)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+Exp_Demo_Train <- sl3_Task$new(
+  data = DemoDxExp_LASSOa[-1][trn_indx, ],
+  covariates = colnames(DemoDxExp_LASSOa)[-c(1, 100)],
+  outcome = colnames(DemoDxExp_LASSOa)[100],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+Exp_Demo_Test <- sl3_Task$new(
+  data = DemoDxExp_LASSOa[-1][tst_indx, ],
+  covariates = colnames(DemoDxExp_LASSOa)[-c(1,100)],
+  outcome = colnames(DemoDxExp_LASSOa)[100],
+  outcome_type = "continuous"
+)
+
+Exp_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(rf_learner, gb_learner)
+stack_fit<-learner_stack$train(Exp_Demo_Train)
+
+stack_preds<-stack_fit$predict(Exp_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(Exp_Demo_Train)
+cv_preds<-cv_fit$predict(Exp_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#RF Model 
+predsLM <- cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE
+actualLM <- DemoDxExp_LASSOa$HosExpCapita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GBM Model 
+predsLM <- cv_preds$Lrnr_gbm_10000_2_0.001
+actualLM <- DemoDxExp_LASSOa$HosExpCapita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE
+```{r}
+#Random Forest 
+mean((cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE - DemoDxExp_LASSOa$HosExpCapita[tst_indx])^2)
+#GBM
+mean((cv_preds$Lrnr_gbm_10000_2_0.001 - DemoDxExp_LASSOa$HosExpCapita[tst_indx])^2)
+```
+
+
+## Iteration 2a: Demographic and disease/health status variables selected from Random Forest feature selection
+
+###ER visits w/ features selected from random forest 
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxER_RF$TotER17Capita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxER_RF)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+ER_Demo_Train <- sl3_Task$new(
+  data = DemoDxER_RF[-1][trn_indx, ],
+  covariates = colnames(DemoDxER_RF)[-c(1,32)],
+  outcome = colnames(DemoDxER_RF)[32],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+ER_Demo_Test <- sl3_Task$new(
+  data = DemoDxER_RF[-1][tst_indx, ],
+  covariates = colnames(DemoDxER_RF)[-c(1, 32)],
+  outcome = colnames(DemoDxER_RF)[32],
+  outcome_type = "continuous"
+)
+
+ER_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(lrnr_glm, glmnet_learner, rf_learner, gb_learner)
+stack_fit<-learner_stack$train(ER_Demo_Train)
+
+stack_preds<-stack_fit$predict(ER_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(ER_Demo_Train)
+cv_preds<-cv_fit$predict(ER_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_glm_TRUE
+actualLM <- DemoDxER_RF$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE
+actualLM <- DemoDxER_RF$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#RF Model 
+predsLM <- cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE
+actualLM <- DemoDxER_RF$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GBM Model 
+predsLM <- cv_preds$Lrnr_gbm_10000_2_0.001
+actualLM <- DemoDxER_RF$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+
+Calculate MSE 
+```{r}
+#GLM model 
+mean((cv_preds$Lrnr_glm_TRUE - DemoDxER_RF$TotER17Capita[tst_indx])^2)
+#GLMNET 
+mean((cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE - DemoDxER_RF$TotER17Capita[tst_indx])^2)
+#Random Forest 
+mean((cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE - DemoDxER_RF$TotER17Capita[tst_indx])^2)
+#GBM
+mean((cv_preds$Lrnr_gbm_10000_2_0.001 - DemoDxER_RF$TotER17Capita[tst_indx])^2)
+```
+
+
+###IP Days w/ features selected from random forest 
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxIP_RF$InpDay17Capita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxIP_RF)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+IP_Demo_Train <- sl3_Task$new(
+  data = DemoDxIP_RF[-1][trn_indx, ],
+  covariates = colnames(DemoDxIP_RF)[-c(1, 32)],
+  outcome = colnames(DemoDxIP_RF)[32],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+IP_Demo_Test <- sl3_Task$new(
+  data = DemoDxIP_RF[-1][tst_indx, ],
+  covariates = colnames(DemoDxIP_RF)[-c(1, 32)],
+  outcome = colnames(DemoDxIP_RF)[32],
+  outcome_type = "continuous"
+)
+
+IP_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(lrnr_glm, glmnet_learner, rf_learner, gb_learner)
+stack_fit<-learner_stack$train(IP_Demo_Train)
+
+stack_preds<-stack_fit$predict(IP_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(IP_Demo_Train)
+cv_preds<-cv_fit$predict(IP_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_glm_TRUE
+actualLM <- DemoDxIP_RF$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE
+actualLM <- DemoDxIP_RF$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#RF Model 
+predsLM <- cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE
+actualLM <- DemoDxIP_RF$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GBM Model 
+predsLM <- cv_preds$Lrnr_gbm_10000_2_0.001
+actualLM <- DemoDxIP_RF$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE 
+```{r}
+#GLM model 
+mean((cv_preds$Lrnr_glm_TRUE - DemoDxIP_RF$InpDay17Capita[tst_indx])^2)
+#GLMNET 
+mean((cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE - DemoDxIP_RF$InpDay17Capita[tst_indx])^2)
+#Random Forest 
+mean((cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE - DemoDxIP_RF$InpDay17Capita[tst_indx])^2)
+#GBM
+mean((cv_preds$Lrnr_gbm_10000_2_0.001 - DemoDxIP_RF$InpDay17Capita[tst_indx])^2)
+```
+
+
+###Hospital expenditures w/ features selected from random forest 
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxExp_RF$HosExpCapita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxExp_RF)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+Exp_Demo_Train <- sl3_Task$new(
+  data = DemoDxExp_RF[-1][trn_indx, ],
+  covariates = colnames(DemoDxExp_RF)[-c(1, 31)],
+  outcome = colnames(DemoDxExp_RF)[31],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+Exp_Demo_Test <- sl3_Task$new(
+  data = DemoDxExp_RF[-1][tst_indx, ],
+  covariates = colnames(DemoDxExp_RF)[-c(1, 31)],
+  outcome = colnames(DemoDxExp_RF)[31],
+  outcome_type = "continuous"
+)
+
+Exp_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(lrnr_glm, glmnet_learner, rf_learner, gb_learner)
+stack_fit<-learner_stack$train(Exp_Demo_Train)
+
+stack_preds<-stack_fit$predict(Exp_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(Exp_Demo_Train)
+cv_preds<-cv_fit$predict(Exp_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_glm_TRUE
+actualLM <- DemoDxExp_RF$HosExpCapita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE
+actualLM <- DemoDxExp_RF$HosExpCapita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#RF Model 
+predsLM <- cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE
+actualLM <- DemoDxExp_RF$HosExpCapita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GBM Model 
+predsLM <- cv_preds$Lrnr_gbm_10000_2_0.001
+actualLM <- DemoDxExp_RF$HosExpCapita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE 
+```{r}
+#GLM model 
+mean((cv_preds$Lrnr_glm_TRUE - DemoDxExp_RF$HosExpCapita[tst_indx])^2)
+#GLMNET 
+mean((cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE - DemoDxExp_RF$HosExpCapita[tst_indx])^2)
+#Random Forest 
+mean((cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE - DemoDxExp_RF$HosExpCapita[tst_indx])^2)
+#GBM
+mean((cv_preds$Lrnr_gbm_10000_2_0.001 - DemoDxExp_RF$HosExpCapita[tst_indx])^2)
+```
+
+#Iteration 2b:Demographic and community characteristics variables 
+```{r}
+#demographic (original)
+load(file="~/County/CandidateExposures/Demo1ERa_12.15a.Rda")
+load(file="~/County/CandidateExposures/Demo1IPa_12.15a.Rda")
+load(file="~/County/CandidateExposures/Demo1Expa_12.15a.Rda")
+
+#community characteristics original 
+load(file="~/County/CandidateExposures/CommER_12.15a.Rda")
+load(file="~/County/CandidateExposures/CommIP_12.15a.Rda")
+load(file="~/County/CandidateExposures/CommExp_12.15a.Rda")
+
+#LASSO demographics coefficients 
+load(file="~/County/Model/ER_Demo_Coef_10.07.Rda")
+load(file="~/County/Model/IP_Demo_Coef_10.07.Rda")
+load(file="~/County/Model/Exp_Demo_Coef_10.07.Rda")
+
+#LASSO community characteristic 
+load(file="~/County/Model/ER_Employ_Coef_10.07.Rda")
+load(file="~/County/Model/IP_Employ_Coef_10.07.Rda")
+load(file="~/County/Model/Exp_Employ_Coef_10.07.Rda")
+
+#Random Forest Demographic variable importance 
+load(file="~/County/Model/ER_Demo_Var_10.07.Rda")
+load(file="~/County/Model/IP_Demo_Var_10.07.Rda")
+load(file="~/County/Model/HosExp_Demo_Var_10.07.Rda")
+
+#Random Forest community characteristics
+load(file="~/County/Model/ER_Employ_Var_10.07.Rda")
+load(file="~/County/Model/IP_Employ_Var_10.07.Rda")
+load(file="~/County/Model/HosExp_Employ_Var_10.07.Rda")
+
+```
+
+Change name of AllCounties in demographic files to All_Counties, to ensure proper merge on the variable
+```{r}
+names(Demo1ERa_12.15a)[names(Demo1ERa_12.15a) == 'AllCounties'] <- 'All_Counties'
+names(Demo1IPa_12.15a)[names(Demo1IPa_12.15a) == 'AllCounties'] <- 'All_Counties'
+names(Demo1Expa_12.15a)[names(Demo1Expa_12.15a) == 'AllCounties'] <- 'All_Counties'
+```
+
+Merge demographics & disease/health status data 
+```{r}
+#ER Visits 
+DemoDxER<-merge(Demo1ERa_12.15a, CommER_12.15a, by="All_Counties")
+#Drop extra outcome generated from merge 
+DemoDxER<-DemoDxER[-c(151)]
+#rename outcome
+names(DemoDxER)[names(DemoDxER)=="TotER17Capita.y"] <- "TotER17Capita"
+
+#IP visits 
+DemoDxIP<-merge(Demo1IPa_12.15a, CommIP_12.15a, by="All_Counties")
+#Drop extra outcome generated from merge 
+DemoDxIP<-DemoDxIP[-c(151)]
+#rename outcome
+names(DemoDxIP)[names(DemoDxIP)=="InpDay17Capita.y"] <- "InpDay17Capita"
+
+#Hospital expenditures 
+DemoDxExp<-merge(Demo1Expa_12.15a, CommExp_12.15a, by="All_Counties")
+#Drop extra outcome generated from merge 
+DemoDxExp<-DemoDxExp[-c(151)]
+#rename outcome
+names(DemoDxExp)[names(DemoDxExp)=="HosExpCapita.y"] <- "HosExpCapita"
+```
+
+Subset demographic + disease/health status variables to include only those selected by LASSO models 
+```{r}
+#ER  visits 
+rownames(ER_Demo_Coef_10.07)[rownames(ER_Demo_Coef_10.07) == "X.Intercept."] = "TotER17Capita"
+ER_Demo_Coef_10.07<-rownames(ER_Demo_Coef_10.07)
+rownames(ER_Employ_Coef_10.07)[rownames(ER_Employ_Coef_10.07) == "X.Intercept."] = "TotER17Capita"
+ER_Employ_Coef_10.07<-rownames(ER_Employ_Coef_10.07)
+
+#combine coefficient rownames 
+ERDx<-c(ER_Demo_Coef_10.07, ER_Employ_Coef_10.07, "All_Counties")
+
+col.num <- which(colnames(DemoDxER) %in% ERDx )
+DemoDxER_LASSOa<-DemoDxER[c(col.num)]
+
+#IP Days 
+rownames(IP_Demo_Coef_10.07)[rownames(IP_Demo_Coef_10.07) == "X.Intercept."] = "InpDay17Capita"
+IP_Demo_Coef_10.07<-rownames(IP_Demo_Coef_10.07)
+rownames(IP_Employ_Coef_10.07)[rownames(IP_Employ_Coef_10.07) == "X.Intercept."] = "InpDay17Capita"
+IP_Employ_Coef_10.07<-rownames(IP_Employ_Coef_10.07)
+
+#combine coefficient rownames 
+IPDx<-c(IP_Demo_Coef_10.07, IP_Employ_Coef_10.07, "All_Counties")
+
+col.num <- which(colnames(DemoDxIP) %in% IPDx)
+DemoDxIP_LASSOa<-DemoDxIP[c(col.num)]
+
+#Hospital expenditures 
+Exp_Demo_Coef_10.07<-rownames(Exp_Demo_Coef_10.07)
+Exp_Demo_Coef_10.07<-c(Exp_Demo_Coef_10.07, "HosExpCapita")
+Exp_Employ_Coef_10.07<-rownames(Exp_Employ_Coef_10.07)
+
+ExpDx<-c(Exp_Demo_Coef_10.07, Exp_Employ_Coef_10.07, "All_Counties")
+
+col.num <- which(colnames(DemoDxExp) %in% ExpDx)
+DemoDxExp_LASSOa<-DemoDxExp[c(col.num)]
+```
+
+Remove second order terms from DemoDxER
+```{r}
+DemoDxER_noi<-DemoDxER[-c(151:165, 318:332)]
+DemoDxIP_noi<-DemoDxIP[-c(151:165, 318:333)]
+DemoDxExp_noi<-DemoDxExp[-c(151:165, 315:329)]
+```
+
+Subset demographic + disease/health status variables to include only those selected by Random Forest models 
+```{r}
+#ER Visits 
+ER_Demo_Var_10.07<-rownames(ER_Demo_Var_10.07)
+ER_Demo_Var_10.07<-c(ER_Demo_Var_10.07, "TotER17Capita")
+ER_Employ_Var_10.07<-rownames(ER_Employ_Var_10.07)
+
+ERDx_RF<-c(ER_Demo_Var_10.07, ER_Employ_Var_10.07, "All_Counties")
+
+col.num <- which(colnames(DemoDxER_noi) %in% ERDx_RF )
+DemoDxER_RF<-DemoDxER_noi[c(col.num)]
+
+#IP Visits 
+IP_Demo_Var_10.07<-rownames(IP_Demo_Var_10.07)
+IP_Demo_Var_10.07<-c(IP_Demo_Var_10.07, "InpDay17Capita")
+IP_Employ_Var_10.07<-rownames(IP_Employ_Var_10.07)
+
+IPDx_RF<-c(IP_Demo_Var_10.07, IP_Employ_Var_10.07, "All_Counties")
+
+col.num <- which(colnames(DemoDxIP_noi) %in% IPDx_RF )
+DemoDxIP_RF<-DemoDxIP_noi[c(col.num)]
+
+#Hospital expenditures 
+HosExp_Demo_Var_10.07<-rownames(HosExp_Demo_Var_10.07)
+HosExp_Demo_Var_10.07<-c(HosExp_Demo_Var_10.07, "HosExpCapita")
+HosExp_Employ_Var_10.07<-rownames(HosExp_Employ_Var_10.07)
+
+ExpDx_RF<-c(HosExp_Demo_Var_10.07, HosExp_Employ_Var_10.07, "All_Counties")
+
+col.num <- which(colnames(DemoDxExp_noi) %in% ExpDx_RF )
+DemoDxExp_RF<-DemoDxExp_noi[c(col.num)]
+
+```
+
+
+### Demographic and Community variables selected from LASSO 
+
+###ER visits w/ features selected from LASSO
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70130)
+trn_indx <- createDataPartition(DemoDxER_LASSOa$TotER17Capita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxER_LASSOa)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+ER_Demo_Train <- sl3_Task$new(
+  data = DemoDxER_LASSOa[-1][trn_indx, ],
+  covariates = colnames(DemoDxER_LASSOa)[-c(1,123)],
+  outcome = colnames(DemoDxER_LASSOa)[123],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+ER_Demo_Test <- sl3_Task$new(
+  data = DemoDxER_LASSOa[-1][tst_indx, ],
+  covariates = colnames(DemoDxER_LASSOa)[-c(1,123)],
+  outcome = colnames(DemoDxER_LASSOa)[123],
+  outcome_type = "continuous"
+)
+
+ER_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(lrnr_glm, glmnet_learner)
+stack_fit<-learner_stack$train(ER_Demo_Train)
+
+stack_preds<-stack_fit$predict(ER_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(ER_Demo_Train)
+cv_preds<-cv_fit$predict(ER_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_glm_TRUE
+actualLM <- DemoDxER_LASSOa$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE
+actualLM <- DemoDxER_LASSOa$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE 
+```{r}
+#GLM model 
+mean((cv_preds$Lrnr_glm_TRUE - DemoDxER_LASSOa$TotER17Capita[tst_indx])^2)
+#GLMNET 
+mean((cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE - DemoDxER_LASSOa$TotER17Capita[tst_indx])^2)
+```
+
+
+Remove second order terms, will be used to run nonparametric models
+```{r}
+DemoDxER_LASSOa<-DemoDxER_LASSOa[-c(36:38, 124:127)]
+```
+
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxER_LASSOa$TotER17Capita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxER_LASSOa)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+ER_Demo_Train <- sl3_Task$new(
+  data = DemoDxER_LASSOa[-1][trn_indx, ],
+  covariates = colnames(DemoDxER_LASSOa)[-c(1,120)],
+  outcome = colnames(DemoDxER_LASSOa)[120],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+ER_Demo_Test <- sl3_Task$new(
+  data = DemoDxER_LASSOa[-1][tst_indx, ],
+  covariates = colnames(DemoDxER_LASSOa)[-c(1,120)],
+  outcome = colnames(DemoDxER_LASSOa)[120],
+  outcome_type = "continuous"
+)
+
+ER_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(rf_learner, gb_learner)
+stack_fit<-learner_stack$train(ER_Demo_Train)
+
+stack_preds<-stack_fit$predict(ER_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(ER_Demo_Train)
+cv_preds<-cv_fit$predict(ER_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#RF Model 
+predsLM <- cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE
+actualLM <- DemoDxER_LASSOa$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GBM Model 
+predsLM <- cv_preds$Lrnr_gbm_10000_2_0.001
+actualLM <- DemoDxER_LASSOa$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE
+```{r}
+#Random Forest 
+mean((cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE - DemoDxER_LASSOa$TotER17Capita[tst_indx])^2)
+#GBM
+mean((cv_preds$Lrnr_gbm_10000_2_0.001 - DemoDxER_LASSOa$TotER17Capita[tst_indx])^2)
+```
+
+
+###IP Days w/ features selected from LASSO
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxIP_LASSOa$InpDay17Capita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxIP_LASSOa)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+IP_Demo_Train <- sl3_Task$new(
+  data = DemoDxIP_LASSOa[-1][trn_indx, ],
+  covariates = colnames(DemoDxIP_LASSOa)[-c(1,126)],
+  outcome = colnames(DemoDxIP_LASSOa)[126],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+IP_Demo_Test <- sl3_Task$new(
+  data = DemoDxIP_LASSOa[-1][tst_indx, ],
+  covariates = colnames(DemoDxIP_LASSOa)[-c(1,126)],
+  outcome = colnames(DemoDxIP_LASSOa)[126],
+  outcome_type = "continuous"
+)
+
+IP_Demo_Train
+```
+
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(lrnr_glm, glmnet_learner)
+stack_fit<-learner_stack$train(IP_Demo_Train)
+
+stack_preds<-stack_fit$predict(IP_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(IP_Demo_Train)
+cv_preds<-cv_fit$predict(IP_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_glm_TRUE
+actualLM <- DemoDxIP_LASSOa$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE
+actualLM <- DemoDxIP_LASSOa$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE 
+```{r}
+#GLM model 
+mean((cv_preds$Lrnr_glm_TRUE - DemoDxIP_LASSOa$InpDay17Capita[tst_indx])^2)
+#GLMNET 
+mean((cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE - DemoDxIP_LASSOa$InpDay17Capita[tst_indx])^2)
+```
+
+Remove second order terms and run nonparametric models 
+```{r}
+DemoDxIP_LASSOa<-DemoDxIP_LASSOa[-c(49:53, 127:131)]
+```
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxIP_LASSOa$InpDay17Capita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxIP_LASSOa)) %in% trn_indx))
+```
+
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+IP_Demo_Train <- sl3_Task$new(
+  data = DemoDxIP_LASSOa[-1][trn_indx, ],
+  covariates = colnames(DemoDxIP_LASSOa)[-c(1,121)],
+  outcome = colnames(DemoDxIP_LASSOa)[121],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+IP_Demo_Test <- sl3_Task$new(
+  data = DemoDxIP_LASSOa[-1][tst_indx, ],
+  covariates = colnames(DemoDxIP_LASSOa)[-c(1,121)],
+  outcome = colnames(DemoDxIP_LASSOa)[121],
+  outcome_type = "continuous"
+)
+
+IP_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(rf_learner, gb_learner)
+stack_fit<-learner_stack$train(IP_Demo_Train)
+
+stack_preds<-stack_fit$predict(IP_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(IP_Demo_Train)
+cv_preds<-cv_fit$predict(IP_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE
+actualLM <- DemoDxIP_LASSOa$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_gbm_10000_2_0.001
+actualLM <- DemoDxIP_LASSOa$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE
+```{r}
+#Random Forest 
+mean((cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE - DemoDxIP_LASSOa$InpDay17Capita[tst_indx])^2)
+#GBM
+mean((cv_preds$Lrnr_gbm_10000_2_0.001 - DemoDxIP_LASSOa$InpDay17Capita[tst_indx])^2)
+```
+
+###Hospital expenditures w/ features selected by LASSO
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxExp_LASSOa$HosExpCapita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxExp_LASSOa)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+Exp_Demo_Train <- sl3_Task$new(
+  data = DemoDxExp_LASSOa[-1][trn_indx, ],
+  covariates = colnames(DemoDxExp_LASSOa)[-c(1, 115)],
+  outcome = colnames(DemoDxExp_LASSOa)[115],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+Exp_Demo_Test <- sl3_Task$new(
+  data = DemoDxExp_LASSOa[-1][tst_indx, ],
+  covariates = colnames(DemoDxExp_LASSOa)[-c(1,115)],
+  outcome = colnames(DemoDxExp_LASSOa)[115],
+  outcome_type = "continuous"
+)
+
+Exp_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(lrnr_glm, glmnet_learner)
+stack_fit<-learner_stack$train(Exp_Demo_Train)
+
+stack_preds<-stack_fit$predict(Exp_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(Exp_Demo_Train)
+cv_preds<-cv_fit$predict(Exp_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_glm_TRUE
+actualLM <- DemoDxIP_LASSOa$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE
+actualLM <- DemoDxIP_LASSOa$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE 
+```{r}
+#GLM model 
+mean((cv_preds$Lrnr_glm_TRUE - DemoDxExp_LASSOa$HosExpCapita[tst_indx])^2)
+#GLMNET 
+mean((cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE - DemoDxExp_LASSOa$HosExpCapita[tst_indx])^2)
+```
+
+
+Remove second order terms and run nonparametrics models
+```{r}
+DemoDxExp_LASSOa<-DemoDxExp_LASSOa[-c(66:71, 116:117)]
+```
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxExp_LASSOa$HosExpCapita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxExp_LASSOa)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+Exp_Demo_Train <- sl3_Task$new(
+  data = DemoDxExp_LASSOa[-1][trn_indx, ],
+  covariates = colnames(DemoDxExp_LASSOa)[-c(1, 109)],
+  outcome = colnames(DemoDxExp_LASSOa)[109],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+Exp_Demo_Test <- sl3_Task$new(
+  data = DemoDxExp_LASSOa[-1][tst_indx, ],
+  covariates = colnames(DemoDxExp_LASSOa)[-c(1,109)],
+  outcome = colnames(DemoDxExp_LASSOa)[109],
+  outcome_type = "continuous"
+)
+
+Exp_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(rf_learner, gb_learner)
+stack_fit<-learner_stack$train(Exp_Demo_Train)
+
+stack_preds<-stack_fit$predict(Exp_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(Exp_Demo_Train)
+cv_preds<-cv_fit$predict(Exp_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#RF Model 
+predsLM <- cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE
+actualLM <- DemoDxExp_LASSOa$HosExpCapita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GBM Model 
+predsLM <- cv_preds$Lrnr_gbm_10000_2_0.001
+actualLM <- DemoDxExp_LASSOa$HosExpCapita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE
+```{r}
+#Random Forest 
+mean((cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE - DemoDxExp_LASSOa$HosExpCapita[tst_indx])^2)
+#GBM
+mean((cv_preds$Lrnr_gbm_10000_2_0.001 - DemoDxExp_LASSOa$HosExpCapita[tst_indx])^2)
+```
+
+
+## Iteration 2b: Demographic and community variables selected from Random Forest feature selection
+
+###ER visits w/ features selected from random forest 
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxER_RF$TotER17Capita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxER_RF)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+ER_Demo_Train <- sl3_Task$new(
+  data = DemoDxER_RF[-1][trn_indx, ],
+  covariates = colnames(DemoDxER_RF)[-c(1,32)],
+  outcome = colnames(DemoDxER_RF)[32],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+ER_Demo_Test <- sl3_Task$new(
+  data = DemoDxER_RF[-1][tst_indx, ],
+  covariates = colnames(DemoDxER_RF)[-c(1, 32)],
+  outcome = colnames(DemoDxER_RF)[32],
+  outcome_type = "continuous"
+)
+
+ER_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(lrnr_glm, glmnet_learner, rf_learner, gb_learner)
+stack_fit<-learner_stack$train(ER_Demo_Train)
+
+stack_preds<-stack_fit$predict(ER_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(ER_Demo_Train)
+cv_preds<-cv_fit$predict(ER_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_glm_TRUE
+actualLM <- DemoDxER_RF$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE
+actualLM <- DemoDxER_RF$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#RF Model 
+predsLM <- cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE
+actualLM <- DemoDxER_RF$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GBM Model 
+predsLM <- cv_preds$Lrnr_gbm_10000_2_0.001
+actualLM <- DemoDxER_RF$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE 
+```{r}
+#GLM model 
+mean((cv_preds$Lrnr_glm_TRUE - DemoDxER_RF$TotER17Capita[tst_indx])^2)
+#GLMNET 
+mean((cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE - DemoDxER_RF$TotER17Capita[tst_indx])^2)
+#Random Forest 
+mean((cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE - DemoDxER_RF$TotER17Capita[tst_indx])^2)
+#GBM
+mean((cv_preds$Lrnr_gbm_10000_2_0.001 - DemoDxER_RF$TotER17Capita[tst_indx])^2)
+```
+
+
+###IP Days w/ features selected from random forest 
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxIP_RF$InpDay17Capita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxIP_RF)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+IP_Demo_Train <- sl3_Task$new(
+  data = DemoDxIP_RF[-1][trn_indx, ],
+  covariates = colnames(DemoDxIP_RF)[-c(1, 32)],
+  outcome = colnames(DemoDxIP_RF)[32],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+IP_Demo_Test <- sl3_Task$new(
+  data = DemoDxIP_RF[-1][tst_indx, ],
+  covariates = colnames(DemoDxIP_RF)[-c(1, 32)],
+  outcome = colnames(DemoDxIP_RF)[32],
+  outcome_type = "continuous"
+)
+
+IP_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(lrnr_glm, glmnet_learner, rf_learner, gb_learner)
+stack_fit<-learner_stack$train(IP_Demo_Train)
+
+stack_preds<-stack_fit$predict(IP_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(IP_Demo_Train)
+cv_preds<-cv_fit$predict(IP_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_glm_TRUE
+actualLM <- DemoDxIP_RF$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE
+actualLM <- DemoDxIP_RF$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#RF Model 
+predsLM <- cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE
+actualLM <- DemoDxIP_RF$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GBM Model 
+predsLM <- cv_preds$Lrnr_gbm_10000_2_0.001
+actualLM <- DemoDxIP_RF$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE 
+```{r}
+#GLM model 
+mean((cv_preds$Lrnr_glm_TRUE - DemoDxIP_RF$InpDay17Capita[tst_indx])^2)
+#GLMNET 
+mean((cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE - DemoDxIP_RF$InpDay17Capita[tst_indx])^2)
+#Random Forest 
+mean((cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE - DemoDxIP_RF$InpDay17Capita[tst_indx])^2)
+#GBM
+mean((cv_preds$Lrnr_gbm_10000_2_0.001 - DemoDxIP_RF$InpDay17Capita[tst_indx])^2)
+```
+
+###Hospital expenditures w/ features selected from random forest 
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxExp_RF$HosExpCapita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxExp_RF)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+Exp_Demo_Train <- sl3_Task$new(
+  data = DemoDxExp_RF[-1][trn_indx, ],
+  covariates = colnames(DemoDxExp_RF)[-c(1, 32)],
+  outcome = colnames(DemoDxExp_RF)[32],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+Exp_Demo_Test <- sl3_Task$new(
+  data = DemoDxExp_RF[-1][tst_indx, ],
+  covariates = colnames(DemoDxExp_RF)[-c(1, 32)],
+  outcome = colnames(DemoDxExp_RF)[32],
+  outcome_type = "continuous"
+)
+
+Exp_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(lrnr_glm, glmnet_learner, rf_learner, gb_learner)
+stack_fit<-learner_stack$train(Exp_Demo_Train)
+
+stack_preds<-stack_fit$predict(Exp_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(Exp_Demo_Train)
+cv_preds<-cv_fit$predict(Exp_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_glm_TRUE
+actualLM <- DemoDxExp_RF$HosExpCapita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE
+actualLM <- DemoDxExp_RF$HosExpCapita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#RF Model 
+predsLM <- cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE
+actualLM <- DemoDxExp_RF$HosExpCapita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GBM Model 
+predsLM <- cv_preds$Lrnr_gbm_10000_2_0.001
+actualLM <- DemoDxExp_RF$HosExpCapita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE 
+```{r}
+#GLM model 
+mean((cv_preds$Lrnr_glm_TRUE - DemoDxExp_RF$HosExpCapita[tst_indx])^2)
+#GLMNET 
+mean((cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE - DemoDxExp_RF$HosExpCapita[tst_indx])^2)
+#Random Forest 
+mean((cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE - DemoDxExp_RF$HosExpCapita[tst_indx])^2)
+#GBM
+mean((cv_preds$Lrnr_gbm_10000_2_0.001 - DemoDxExp_RF$HosExpCapita[tst_indx])^2)
+```
+
+#Iteration 2c. Demographics & consumer expenditures 
+
+```{r}
+#demographic (original)
+load(file="~/County/CandidateExposures/Demo1ERa_12.15a.Rda")
+load(file="~/County/CandidateExposures/Demo1IPa_12.15a.Rda")
+load(file="~/County/CandidateExposures/Demo1Expa_12.15a.Rda")
+
+#consumer expenditures original
+load(file="~/County/CandidateExposures/ConsER_12.15a.Rda")
+load(file="~/County/CandidateExposures/ConsIP_12.15a.Rda")
+load(file="~/County/CandidateExposures/ConsExp_12.15a.Rda")
+
+#LASSO food, household, and miscellaneous consumer purchases 
+load(file="~/County/Model/ER_Food_Coef_10.07.Rda")
+load(file="~/County/Model/IP_Food_Coef_10.07.Rda")
+load(file="~/County/Model/Exp_Food_Coef_10.07.Rda")
+
+#Random Forest food, household, and miscellaneous consumer purchases 
+load(file="~/County/Model/ER_Food_Var_10.07.Rda")
+load(file="~/County/Model/IP_Food_Var_10.07.Rda")
+load(file="~/County/Model/HosExp_Food_Var_10.07.Rda")
+
+#LASSO demographics coefficients 
+load(file="~/County/Model/ER_Demo_Coef_10.07.Rda")
+load(file="~/County/Model/IP_Demo_Coef_10.07.Rda")
+load(file="~/County/Model/Exp_Demo_Coef_10.07.Rda")
+
+#Random Forest Demographic variable importance 
+load(file="~/County/Model/ER_Demo_Var_10.07.Rda")
+load(file="~/County/Model/IP_Demo_Var_10.07.Rda")
+load(file="~/County/Model/HosExp_Demo_Var_10.07.Rda")
+
+```
+
+Change name of AllCounties in demographic files to All_Counties, to ensure proper merge on the variable
+```{r}
+names(Demo1ERa_12.15a)[names(Demo1ERa_12.15a) == 'AllCounties'] <- 'All_Counties'
+names(Demo1IPa_12.15a)[names(Demo1IPa_12.15a) == 'AllCounties'] <- 'All_Counties'
+names(Demo1Expa_12.15a)[names(Demo1Expa_12.15a) == 'AllCounties'] <- 'All_Counties'
+```
+
+Merge demographics & consumer expenditure data 
+```{r}
+#ER Visits 
+DemoDxER<-merge(Demo1ERa_12.15a, ConsER_12.15a, by="All_Counties")
+#Drop extra outcome generated from merge 
+DemoDxER<-DemoDxER[-c(151)]
+#rename outcome
+names(DemoDxER)[names(DemoDxER)=="TotER17Capita.y"] <- "TotER17Capita"
+
+#IP visits 
+DemoDxIP<-merge(Demo1IPa_12.15a, ConsIP_12.15a, by="All_Counties")
+#Drop extra outcome generated from merge 
+DemoDxIP<-DemoDxIP[-c(151)]
+#rename outcome
+names(DemoDxIP)[names(DemoDxIP)=="InpDay17Capita.y"] <- "InpDay17Capita"
+
+#Hospital expenditures 
+DemoDxExp<-merge(Demo1Expa_12.15a, ConsExp_12.15a, by="All_Counties")
+#Drop extra outcome generated from merge 
+DemoDxExp<-DemoDxExp[-c(151)]
+#rename outcome
+names(DemoDxExp)[names(DemoDxExp)=="HosExpCapita.y"] <- "HosExpCapita"
+```
+
+Subset demographic + disease/health status variables to include only those selected by LASSO models 
+```{r}
+#ER  visits 
+rownames(ER_Demo_Coef_10.07)[rownames(ER_Demo_Coef_10.07) == "X.Intercept."] = "TotER17Capita"
+ER_Demo_Coef_10.07<-rownames(ER_Demo_Coef_10.07)
+rownames(ER_Food_Coef_10.07)[rownames(ER_Food_Coef_10.07) == "X.Intercept."] = "TotER17Capita"
+ER_Food_Coef_10.07<-rownames(ER_Food_Coef_10.07)
+
+#combine coefficient rownames 
+ERDx<-c(ER_Demo_Coef_10.07, ER_Food_Coef_10.07, "All_Counties")
+
+col.num <- which(colnames(DemoDxER) %in% ERDx )
+DemoDxER_LASSOa<-DemoDxER[c(col.num)]
+
+#IP Days 
+rownames(IP_Demo_Coef_10.07)[rownames(IP_Demo_Coef_10.07) == "X.Intercept."] = "InpDay17Capita"
+IP_Demo_Coef_10.07<-rownames(IP_Demo_Coef_10.07)
+rownames(IP_Food_Coef_10.07)[rownames(IP_Food_Coef_10.07) == "X.Intercept."] = "InpDay17Capita"
+IP_Food_Coef_10.07<-rownames(IP_Food_Coef_10.07)
+
+#combine coefficient rownames 
+IPDx<-c(IP_Demo_Coef_10.07, IP_Food_Coef_10.07, "All_Counties")
+
+col.num <- which(colnames(DemoDxIP) %in% IPDx)
+DemoDxIP_LASSOa<-DemoDxIP[c(col.num)]
+
+#Hospital expenditures 
+Exp_Demo_Coef_10.07<-rownames(Exp_Demo_Coef_10.07)
+Exp_Demo_Coef_10.07<-c(Exp_Demo_Coef_10.07, "HosExpCapita")
+Exp_Food_Coef_10.07<-rownames(Exp_Food_Coef_10.07)
+
+ExpDx<-c(Exp_Demo_Coef_10.07, Exp_Food_Coef_10.07, "All_Counties")
+
+col.num <- which(colnames(DemoDxExp) %in% ExpDx)
+DemoDxExp_LASSOa<-DemoDxExp[c(col.num)]
+```
+
+Remove second order terms from DemoDxER
+```{r}
+DemoDxER_noi<-DemoDxER[-c(151:165, 738:794)]
+DemoDxIP_noi<-DemoDxIP[-c(151:165, 738:794)]
+DemoDxExp_noi<-DemoDxExp[-c(151:162, 735:788)]
+```
+
+Subset demographic + disease/health status variables to include only those selected by Random Forest models 
+```{r}
+#ER Visits 
+ER_Demo_Var_10.07<-rownames(ER_Demo_Var_10.07)
+ER_Demo_Var_10.07<-c(ER_Demo_Var_10.07, "TotER17Capita")
+ER_Food_Var_10.07<-rownames(ER_Food_Var_10.07)
+
+ERDx_RF<-c(ER_Demo_Var_10.07, ER_Food_Var_10.07, "All_Counties")
+
+col.num <- which(colnames(DemoDxER_noi) %in% ERDx_RF )
+DemoDxER_RF<-DemoDxER_noi[c(col.num)]
+
+#IP Visits 
+IP_Demo_Var_10.07<-rownames(IP_Demo_Var_10.07)
+IP_Demo_Var_10.07<-c(IP_Demo_Var_10.07, "InpDay17Capita")
+IP_Food_Var_10.07<-rownames(IP_Food_Var_10.07)
+
+IPDx_RF<-c(IP_Demo_Var_10.07, IP_Food_Var_10.07, "All_Counties")
+
+col.num <- which(colnames(DemoDxIP_noi) %in% IPDx_RF )
+DemoDxIP_RF<-DemoDxIP_noi[c(col.num)]
+
+#Hospital expenditures 
+HosExp_Demo_Var_10.07<-rownames(HosExp_Demo_Var_10.07)
+HosExp_Demo_Var_10.07<-c(HosExp_Demo_Var_10.07, "HosExpCapita")
+HosExp_Food_Var_10.07<-rownames(HosExp_Food_Var_10.07)
+
+ExpDx_RF<-c(HosExp_Demo_Var_10.07, HosExp_Food_Var_10.07, "All_Counties")
+
+col.num <- which(colnames(DemoDxExp_noi) %in% ExpDx_RF )
+DemoDxExp_RF<-DemoDxExp_noi[c(col.num)]
+
+```
+
+## Demographic and consumer expenditure variables selected from LASSO 
+
+###ER visits w/ features selected from LASSO
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxER_LASSOa$TotER17Capita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxER_LASSOa)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+ER_Demo_Train <- sl3_Task$new(
+  data = DemoDxER_LASSOa[-1][trn_indx, ],
+  covariates = colnames(DemoDxER_LASSOa)[-c(1,39)],
+  outcome = colnames(DemoDxER_LASSOa)[39],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+ER_Demo_Test <- sl3_Task$new(
+  data = DemoDxER_LASSOa[-1][tst_indx, ],
+  covariates = colnames(DemoDxER_LASSOa)[-c(1,39)],
+  outcome = colnames(DemoDxER_LASSOa)[39],
+  outcome_type = "continuous"
+)
+
+ER_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(lrnr_glm, glmnet_learner)
+stack_fit<-learner_stack$train(ER_Demo_Train)
+
+stack_preds<-stack_fit$predict(ER_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(ER_Demo_Train)
+cv_preds<-cv_fit$predict(ER_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_glm_TRUE
+actualLM <- DemoDxER_LASSOa$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE
+actualLM <- DemoDxER_LASSOa$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE 
+```{r}
+#GLM model 
+mean((cv_preds$Lrnr_glm_TRUE - DemoDxER_LASSOa$TotER17Capita[tst_indx])^2)
+#GLMNET 
+mean((cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE - DemoDxER_LASSOa$TotER17Capita[tst_indx])^2)
+```
+
+Remove second order terms, will be used to run nonparametric models
+```{r}
+DemoDxER_LASSOa<-DemoDxER_LASSOa[-c(36:38, 52:53)]
+```
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxER_LASSOa$TotER17Capita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxER_LASSOa)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+ER_Demo_Train <- sl3_Task$new(
+  data = DemoDxER_LASSOa[-1][trn_indx, ],
+  covariates = colnames(DemoDxER_LASSOa)[-c(1,36)],
+  outcome = colnames(DemoDxER_LASSOa)[36],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+ER_Demo_Test <- sl3_Task$new(
+  data = DemoDxER_LASSOa[-1][tst_indx, ],
+  covariates = colnames(DemoDxER_LASSOa)[-c(1,36)],
+  outcome = colnames(DemoDxER_LASSOa)[36],
+  outcome_type = "continuous"
+)
+
+ER_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(rf_learner, gb_learner)
+stack_fit<-learner_stack$train(ER_Demo_Train)
+
+stack_preds<-stack_fit$predict(ER_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(ER_Demo_Train)
+cv_preds<-cv_fit$predict(ER_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#RF Model 
+predsLM <- cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE
+actualLM <- DemoDxER_LASSOa$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GBM Model 
+predsLM <- cv_preds$Lrnr_gbm_10000_2_0.001
+actualLM <- DemoDxER_LASSOa$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE
+```{r}
+#Random Forest 
+mean((cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE - DemoDxER_LASSOa$TotER17Capita[tst_indx])^2)
+#GBM
+mean((cv_preds$Lrnr_gbm_10000_2_0.001 - DemoDxER_LASSOa$TotER17Capita[tst_indx])^2)
+```
+
+###IP Days w/ features selected from LASSO
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70130)
+trn_indx <- createDataPartition(DemoDxIP_LASSOa$InpDay17Capita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxIP_LASSOa)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+IP_Demo_Train <- sl3_Task$new(
+  data = DemoDxIP_LASSOa[-1][trn_indx, ],
+  covariates = colnames(DemoDxIP_LASSOa)[-c(1,54)],
+  outcome = colnames(DemoDxIP_LASSOa)[54],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+IP_Demo_Test <- sl3_Task$new(
+  data = DemoDxIP_LASSOa[-1][tst_indx, ],
+  covariates = colnames(DemoDxIP_LASSOa)[-c(1,54)],
+  outcome = colnames(DemoDxIP_LASSOa)[54],
+  outcome_type = "continuous"
+)
+
+IP_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(lrnr_glm, glmnet_learner)
+stack_fit<-learner_stack$train(IP_Demo_Train)
+
+stack_preds<-stack_fit$predict(IP_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(IP_Demo_Train)
+cv_preds<-cv_fit$predict(IP_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_glm_TRUE
+actualLM <- DemoDxIP_LASSOa$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE
+actualLM <- DemoDxIP_LASSOa$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE 
+```{r}
+#GLM model 
+mean((cv_preds$Lrnr_glm_TRUE - DemoDxIP_LASSOa$InpDay17Capita[tst_indx])^2)
+#GLMNET 
+mean((cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE - DemoDxIP_LASSOa$InpDay17Capita[tst_indx])^2)
+```
+
+Remove second order terms and run nonparametric models 
+```{r}
+DemoDxIP_LASSOa<-DemoDxIP_LASSOa[-c(49:53, 109:119)]
+```
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70130)
+trn_indx <- createDataPartition(DemoDxIP_LASSOa$InpDay17Capita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxIP_LASSOa)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+IP_Demo_Train <- sl3_Task$new(
+  data = DemoDxIP_LASSOa[-1][trn_indx, ],
+  covariates = colnames(DemoDxIP_LASSOa)[-c(1,49)],
+  outcome = colnames(DemoDxIP_LASSOa)[49],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+IP_Demo_Test <- sl3_Task$new(
+  data = DemoDxIP_LASSOa[-1][tst_indx, ],
+  covariates = colnames(DemoDxIP_LASSOa)[-c(1,49)],
+  outcome = colnames(DemoDxIP_LASSOa)[49],
+  outcome_type = "continuous"
+)
+
+IP_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(rf_learner, gb_learner)
+stack_fit<-learner_stack$train(IP_Demo_Train)
+
+stack_preds<-stack_fit$predict(IP_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(IP_Demo_Train)
+cv_preds<-cv_fit$predict(IP_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE
+actualLM <- DemoDxIP_LASSOa$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_gbm_10000_2_0.001
+actualLM <- DemoDxIP_LASSOa$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE
+```{r}
+#Random Forest 
+mean((cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE - DemoDxIP_LASSOa$InpDay17Capita[tst_indx])^2)
+#GBM
+mean((cv_preds$Lrnr_gbm_10000_2_0.001 - DemoDxIP_LASSOa$InpDay17Capita[tst_indx])^2)
+```
+
+###Hospital expenditures w/ features selected from LASSO
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxExp_LASSOa$HosExpCapita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxExp_LASSOa)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+Exp_Demo_Train <- sl3_Task$new(
+  data = DemoDxExp_LASSOa[-1][trn_indx, ],
+  covariates = colnames(DemoDxExp_LASSOa)[-c(1, 72)],
+  outcome = colnames(DemoDxExp_LASSOa)[72],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+Exp_Demo_Test <- sl3_Task$new(
+  data = DemoDxExp_LASSOa[-1][tst_indx, ],
+  covariates = colnames(DemoDxExp_LASSOa)[-c(1,72)],
+  outcome = colnames(DemoDxExp_LASSOa)[72],
+  outcome_type = "continuous"
+)
+
+Exp_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(lrnr_glm, glmnet_learner)
+stack_fit<-learner_stack$train(Exp_Demo_Train)
+
+stack_preds<-stack_fit$predict(Exp_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(Exp_Demo_Train)
+cv_preds<-cv_fit$predict(Exp_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_glm_TRUE
+actualLM <- DemoDxIP_LASSOa$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE
+actualLM <- DemoDxIP_LASSOa$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE 
+```{r}
+#GLM model 
+mean((cv_preds$Lrnr_glm_TRUE - DemoDxExp_LASSOa$HosExpCapita[tst_indx])^2)
+#GLMNET 
+mean((cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE - DemoDxExp_LASSOa$HosExpCapita[tst_indx])^2)
+```
+
+Remove second order terms and run nonparametrics models
+```{r}
+DemoDxExp_LASSOa<-DemoDxExp_LASSOa[-c(66:71, 122:129)]
+```
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxExp_LASSOa$HosExpCapita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxExp_LASSOa)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+Exp_Demo_Train <- sl3_Task$new(
+  data = DemoDxExp_LASSOa[-1][trn_indx, ],
+  covariates = colnames(DemoDxExp_LASSOa)[-c(1, 66)],
+  outcome = colnames(DemoDxExp_LASSOa)[66],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+Exp_Demo_Test <- sl3_Task$new(
+  data = DemoDxExp_LASSOa[-1][tst_indx, ],
+  covariates = colnames(DemoDxExp_LASSOa)[-c(1,66)],
+  outcome = colnames(DemoDxExp_LASSOa)[66],
+  outcome_type = "continuous"
+)
+
+Exp_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(rf_learner, gb_learner)
+stack_fit<-learner_stack$train(Exp_Demo_Train)
+
+stack_preds<-stack_fit$predict(Exp_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(Exp_Demo_Train)
+cv_preds<-cv_fit$predict(Exp_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#RF Model 
+predsLM <- cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE
+actualLM <- DemoDxExp_LASSOa$HosExpCapita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GBM Model 
+predsLM <- cv_preds$Lrnr_gbm_10000_2_0.001
+actualLM <- DemoDxExp_LASSOa$HosExpCapita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE
+```{r}
+#Random Forest 
+mean((cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE - DemoDxExp_LASSOa$HosExpCapita[tst_indx])^2)
+#GBM
+mean((cv_preds$Lrnr_gbm_10000_2_0.001 - DemoDxExp_LASSOa$HosExpCapita[tst_indx])^2)
+```
+
+## Iteration 2c: Demographic and consumer expenditure variables selected from Random Forest feature selection
+
+###ER visits w/ features selected from random forest 
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxER_RF$TotER17Capita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxER_RF)) %in% trn_indx))
+```
+
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+ER_Demo_Train <- sl3_Task$new(
+  data = DemoDxER_RF[-1][trn_indx, ],
+  covariates = colnames(DemoDxER_RF)[-c(1,17)],
+  outcome = colnames(DemoDxER_RF)[17],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+ER_Demo_Test <- sl3_Task$new(
+  data = DemoDxER_RF[-1][tst_indx, ],
+  covariates = colnames(DemoDxER_RF)[-c(1, 17)],
+  outcome = colnames(DemoDxER_RF)[17],
+  outcome_type = "continuous"
+)
+
+ER_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(lrnr_glm, glmnet_learner, rf_learner, gb_learner)
+stack_fit<-learner_stack$train(ER_Demo_Train)
+
+stack_preds<-stack_fit$predict(ER_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(ER_Demo_Train)
+cv_preds<-cv_fit$predict(ER_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_glm_TRUE
+actualLM <- DemoDxER_RF$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE
+actualLM <- DemoDxER_RF$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#RF Model 
+predsLM <- cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE
+actualLM <- DemoDxER_RF$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GBM Model 
+predsLM <- cv_preds$Lrnr_gbm_10000_2_0.001
+actualLM <- DemoDxER_RF$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+
+Calculate MSE 
+```{r}
+#GLM model 
+mean((cv_preds$Lrnr_glm_TRUE - DemoDxER_RF$TotER17Capita[tst_indx])^2)
+#GLMNET 
+mean((cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE - DemoDxER_RF$TotER17Capita[tst_indx])^2)
+#Random Forest 
+mean((cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE - DemoDxER_RF$TotER17Capita[tst_indx])^2)
+#GBM
+mean((cv_preds$Lrnr_gbm_10000_2_0.001 - DemoDxER_RF$TotER17Capita[tst_indx])^2)
+```
+
+###IP Days w/ features selected from random forest 
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxIP_RF$InpDay17Capita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxIP_RF)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+IP_Demo_Train <- sl3_Task$new(
+  data = DemoDxIP_RF[-1][trn_indx, ],
+  covariates = colnames(DemoDxIP_RF)[-c(1, 17)],
+  outcome = colnames(DemoDxIP_RF)[17],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+IP_Demo_Test <- sl3_Task$new(
+  data = DemoDxIP_RF[-1][tst_indx, ],
+  covariates = colnames(DemoDxIP_RF)[-c(1, 17)],
+  outcome = colnames(DemoDxIP_RF)[17],
+  outcome_type = "continuous"
+)
+
+IP_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(lrnr_glm, glmnet_learner, rf_learner, gb_learner)
+stack_fit<-learner_stack$train(IP_Demo_Train)
+
+stack_preds<-stack_fit$predict(IP_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(IP_Demo_Train)
+cv_preds<-cv_fit$predict(IP_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_glm_TRUE
+actualLM <- DemoDxIP_RF$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE
+actualLM <- DemoDxIP_RF$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#RF Model 
+predsLM <- cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE
+actualLM <- DemoDxIP_RF$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GBM Model 
+predsLM <- cv_preds$Lrnr_gbm_10000_2_0.001
+actualLM <- DemoDxIP_RF$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE 
+```{r}
+#GLM model 
+mean((cv_preds$Lrnr_glm_TRUE - DemoDxIP_RF$InpDay17Capita[tst_indx])^2)
+#GLMNET 
+mean((cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE - DemoDxIP_RF$InpDay17Capita[tst_indx])^2)
+#Random Forest 
+mean((cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE - DemoDxIP_RF$InpDay17Capita[tst_indx])^2)
+#GBM
+mean((cv_preds$Lrnr_gbm_10000_2_0.001 - DemoDxIP_RF$InpDay17Capita[tst_indx])^2)
+```
+
+###Hospital Expenditures w/ features selected from random forest 
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxExp_RF$HosExpCapita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxExp_RF)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+Exp_Demo_Train <- sl3_Task$new(
+  data = DemoDxExp_RF[-1][trn_indx, ],
+  covariates = colnames(DemoDxExp_RF)[-c(1, 17)],
+  outcome = colnames(DemoDxExp_RF)[17],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+Exp_Demo_Test <- sl3_Task$new(
+  data = DemoDxExp_RF[-1][tst_indx, ],
+  covariates = colnames(DemoDxExp_RF)[-c(1, 17)],
+  outcome = colnames(DemoDxExp_RF)[17],
+  outcome_type = "continuous"
+)
+
+Exp_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(lrnr_glm, glmnet_learner, rf_learner, gb_learner)
+stack_fit<-learner_stack$train(Exp_Demo_Train)
+
+stack_preds<-stack_fit$predict(Exp_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(Exp_Demo_Train)
+cv_preds<-cv_fit$predict(Exp_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_glm_TRUE
+actualLM <- DemoDxExp_RF$HosExpCapita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE
+actualLM <- DemoDxExp_RF$HosExpCapita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#RF Model 
+predsLM <- cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE
+actualLM <- DemoDxExp_RF$HosExpCapita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GBM Model 
+predsLM <- cv_preds$Lrnr_gbm_10000_2_0.001
+actualLM <- DemoDxExp_RF$HosExpCapita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE 
+```{r}
+#GLM model 
+mean((cv_preds$Lrnr_glm_TRUE - DemoDxExp_RF$HosExpCapita[tst_indx])^2)
+#GLMNET 
+mean((cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE - DemoDxExp_RF$HosExpCapita[tst_indx])^2)
+#Random Forest 
+mean((cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE - DemoDxExp_RF$HosExpCapita[tst_indx])^2)
+#GBM
+mean((cv_preds$Lrnr_gbm_10000_2_0.001 - DemoDxExp_RF$HosExpCapita[tst_indx])^2)
+```
+
+
+#Iteration 2d:Disease/health variables and and community characteristics variables 
+```{r}
+#adult & child disease and health status (original)
+load(file="~/County/CandidateExposures/DxHealthER_12.15a.Rda")
+load(file="~/County/CandidateExposures/DxHealthIP_12.15a.Rda")
+load(file="~/County/CandidateExposures/DxHealthExp_12.15a.Rda")
+
+#community characteristics original 
+load(file="~/County/CandidateExposures/CommER_12.15a.Rda")
+load(file="~/County/CandidateExposures/CommIP_12.15a.Rda")
+load(file="~/County/CandidateExposures/CommExp_12.15a.Rda")
+
+#LASSO community characteristic 
+load(file="~/County/Model/ER_Employ_Coef_10.07.Rda")
+load(file="~/County/Model/IP_Employ_Coef_10.07.Rda")
+load(file="~/County/Model/Exp_Employ_Coef_10.07.Rda")
+
+#Random Forest community characteristics
+load(file="~/County/Model/ER_Employ_Var_10.07.Rda")
+load(file="~/County/Model/IP_Employ_Var_10.07.Rda")
+load(file="~/County/Model/HosExp_Employ_Var_10.07.Rda")
+
+#LASSO disease and health status 
+load(file="~/County/Model/ER_Adult_Coef_10.07.Rda")
+load(file="~/County/Model/IP_Adult_Coef_10.07.Rda")
+load(file="~/County/Model/Exp_Adult_Coef_10.07.Rda")
+
+#Random Forest disease and health status 
+load(file="~/County/Model/ER_Adult_Var_10.07.Rda")
+load(file="~/County/Model/IP_Adult_Var_10.07.Rda")
+load(file="~/County/Model/HosExp_Adult_Var_10.07.Rda")
+```
+
+
+Merge demographics & disease/health status data 
+```{r}
+#ER Visits 
+DemoDxER<-merge(DxHealthER_12.15a, CommER_12.15a, by="All_Counties")
+#Drop extra outcome generated from merge 
+DemoDxER<-DemoDxER[-c(148)]
+#rename outcome
+names(DemoDxER)[names(DemoDxER)=="TotER17Capita.y"] <- "TotER17Capita"
+
+#IP visits 
+DemoDxIP<-merge(DxHealthIP_12.15a, CommIP_12.15a, by="All_Counties")
+#Drop extra outcome generated from merge 
+DemoDxIP<-DemoDxIP[-c(148)]
+#rename outcome
+names(DemoDxIP)[names(DemoDxIP)=="InpDay17Capita.y"] <- "InpDay17Capita"
+
+#Hospital expenditures 
+DemoDxExp<-merge(DxHealthExp_12.15a, CommExp_12.15a, by="All_Counties")
+#Drop extra outcome generated from merge 
+DemoDxExp<-DemoDxExp[-c(148)]
+#rename outcome
+names(DemoDxExp)[names(DemoDxExp)=="HosExpCapita.y"] <- "HosExpCapita"
+```
+
+Subset demographic + disease/health status variables to include only those selected by LASSO models 
+```{r}
+#ER  visits 
+rownames(ER_Adult_Coef_10.07)[rownames(ER_Adult_Coef_10.07) == "X.Intercept."] = "TotER17Capita"
+ER_Adult_Coef_10.07<-rownames(ER_Adult_Coef_10.07)
+rownames(ER_Employ_Coef_10.07)[rownames(ER_Employ_Coef_10.07) == "X.Intercept."] = "TotER17Capita"
+ER_Employ_Coef_10.07<-rownames(ER_Employ_Coef_10.07)
+
+#combine coefficient rownames 
+ERDx<-c(ER_Adult_Coef_10.07, ER_Employ_Coef_10.07, "All_Counties")
+
+col.num <- which(colnames(DemoDxER) %in% ERDx )
+DemoDxER_LASSOa<-DemoDxER[c(col.num)]
+
+#IP Days 
+rownames(IP_Adult_Coef_10.07)[rownames(IP_Adult_Coef_10.07) == "X.Intercept."] = "InpDay17Capita"
+IP_Adult_Coef_10.07<-rownames(IP_Adult_Coef_10.07)
+rownames(IP_Employ_Coef_10.07)[rownames(IP_Employ_Coef_10.07) == "X.Intercept."] = "InpDay17Capita"
+IP_Employ_Coef_10.07<-rownames(IP_Employ_Coef_10.07)
+
+#combine coefficient rownames 
+IPDx<-c(IP_Adult_Coef_10.07, IP_Employ_Coef_10.07, "All_Counties")
+
+col.num <- which(colnames(DemoDxIP) %in% IPDx)
+DemoDxIP_LASSOa<-DemoDxIP[c(col.num)]
+
+#Hospital expenditures 
+Exp_Adult_Coef_10.07<-rownames(Exp_Adult_Coef_10.07)
+Exp_Adult_Coef_10.07<-c(Exp_Adult_Coef_10.07, "HosExpCapita")
+Exp_Employ_Coef_10.07<-rownames(Exp_Employ_Coef_10.07)
+
+ExpDx<-c(Exp_Adult_Coef_10.07, Exp_Employ_Coef_10.07, "All_Counties")
+
+col.num <- which(colnames(DemoDxExp) %in% ExpDx)
+DemoDxExp_LASSOa<-DemoDxExp[c(col.num)]
+```
+
+Remove second order terms from DemoDxER
+```{r}
+DemoDxER_noi<-DemoDxER[-c(143:162, 315:329)]
+DemoDxIP_noi<-DemoDxIP[-c(143:162, 315:330)]
+DemoDxExp_noi<-DemoDxExp[-c(143:161, 315:329)]
+```
+
+Subset demographic + disease/health status variables to include only those selected by Random Forest models 
+```{r}
+#ER Visits 
+ER_Adult_Var_10.07<-rownames(ER_Adult_Var_10.07)
+ER_Adult_Var_10.07<-c(ER_Adult_Var_10.07, "TotER17Capita")
+ER_Employ_Var_10.07<-rownames(ER_Employ_Var_10.07)
+
+ERDx_RF<-c(ER_Adult_Var_10.07, ER_Employ_Var_10.07, "All_Counties")
+
+col.num <- which(colnames(DemoDxER_noi) %in% ERDx_RF )
+DemoDxER_RF<-DemoDxER_noi[c(col.num)]
+
+#IP Visits 
+IP_Adult_Var_10.07<-rownames(IP_Adult_Var_10.07)
+IP_Adult_Var_10.07<-c(IP_Adult_Var_10.07, "InpDay17Capita")
+IP_Employ_Var_10.07<-rownames(IP_Employ_Var_10.07)
+
+IPDx_RF<-c(IP_Adult_Var_10.07, IP_Employ_Var_10.07, "All_Counties")
+
+col.num <- which(colnames(DemoDxIP_noi) %in% IPDx_RF )
+DemoDxIP_RF<-DemoDxIP_noi[c(col.num)]
+
+#Hospital expenditures 
+HosExp_Adult_Var_10.07<-rownames(HosExp_Adult_Var_10.07)
+HosExp_Adult_Var_10.07<-c(HosExp_Adult_Var_10.07, "HosExpCapita")
+HosExp_Employ_Var_10.07<-rownames(HosExp_Employ_Var_10.07)
+
+ExpDx_RF<-c(HosExp_Adult_Var_10.07, HosExp_Employ_Var_10.07, "All_Counties")
+
+col.num <- which(colnames(DemoDxExp_noi) %in% ExpDx_RF )
+DemoDxExp_RF<-DemoDxExp_noi[c(col.num)]
+
+```
+
+##Iteraion 2d. Demographic and Community variables selected from LASSO 
+
+###ER visits w/ features selected from LASSO
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxER_LASSOa$TotER17Capita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxER_LASSOa)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+ER_Demo_Train <- sl3_Task$new(
+  data = DemoDxER_LASSOa[-1][trn_indx, ],
+  covariates = colnames(DemoDxER_LASSOa)[-c(1,101)],
+  outcome = colnames(DemoDxER_LASSOa)[101],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+ER_Demo_Test <- sl3_Task$new(
+  data = DemoDxER_LASSOa[-1][tst_indx, ],
+  covariates = colnames(DemoDxER_LASSOa)[-c(1,101)],
+  outcome = colnames(DemoDxER_LASSOa)[101],
+  outcome_type = "continuous"
+)
+
+ER_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(lrnr_glm, glmnet_learner)
+stack_fit<-learner_stack$train(ER_Demo_Train)
+
+stack_preds<-stack_fit$predict(ER_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(ER_Demo_Train)
+cv_preds<-cv_fit$predict(ER_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_glm_TRUE
+actualLM <- DemoDxER_LASSOa$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE
+actualLM <- DemoDxER_LASSOa$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE 
+```{r}
+#GLM model 
+mean((cv_preds$Lrnr_glm_TRUE - DemoDxER_LASSOa$TotER17Capita[tst_indx])^2)
+#GLMNET 
+mean((cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE - DemoDxER_LASSOa$TotER17Capita[tst_indx])^2)
+```
+
+Remove second order terms, will be used to run nonparametric models
+```{r}
+DemoDxER_LASSOa<-DemoDxER_LASSOa[-c(15:16, 102:105)]
+```
+
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxER_LASSOa$TotER17Capita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxER_LASSOa)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+ER_Demo_Train <- sl3_Task$new(
+  data = DemoDxER_LASSOa[-1][trn_indx, ],
+  covariates = colnames(DemoDxER_LASSOa)[-c(1,99)],
+  outcome = colnames(DemoDxER_LASSOa)[99],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+ER_Demo_Test <- sl3_Task$new(
+  data = DemoDxER_LASSOa[-1][tst_indx, ],
+  covariates = colnames(DemoDxER_LASSOa)[-c(1,99)],
+  outcome = colnames(DemoDxER_LASSOa)[99],
+  outcome_type = "continuous"
+)
+
+ER_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(rf_learner, gb_learner)
+stack_fit<-learner_stack$train(ER_Demo_Train)
+
+stack_preds<-stack_fit$predict(ER_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(ER_Demo_Train)
+cv_preds<-cv_fit$predict(ER_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#RF Model 
+predsLM <- cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE
+actualLM <- DemoDxER_LASSOa$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GBM Model 
+predsLM <- cv_preds$Lrnr_gbm_10000_2_0.001
+actualLM <- DemoDxER_LASSOa$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE
+```{r}
+#Random Forest 
+mean((cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE - DemoDxER_LASSOa$TotER17Capita[tst_indx])^2)
+#GBM
+mean((cv_preds$Lrnr_gbm_10000_2_0.001 - DemoDxER_LASSOa$TotER17Capita[tst_indx])^2)
+```
+
+###IP Days w/ features selected from LASSO
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxIP_LASSOa$InpDay17Capita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxIP_LASSOa)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+IP_Demo_Train <- sl3_Task$new(
+  data = DemoDxIP_LASSOa[-1][trn_indx, ],
+  covariates = colnames(DemoDxIP_LASSOa)[-c(1,102)],
+  outcome = colnames(DemoDxIP_LASSOa)[102],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+IP_Demo_Test <- sl3_Task$new(
+  data = DemoDxIP_LASSOa[-1][tst_indx, ],
+  covariates = colnames(DemoDxIP_LASSOa)[-c(1,102)],
+  outcome = colnames(DemoDxIP_LASSOa)[102],
+  outcome_type = "continuous"
+)
+
+IP_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(lrnr_glm, glmnet_learner)
+stack_fit<-learner_stack$train(IP_Demo_Train)
+
+stack_preds<-stack_fit$predict(IP_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(IP_Demo_Train)
+cv_preds<-cv_fit$predict(IP_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_glm_TRUE
+actualLM <- DemoDxIP_LASSOa$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE
+actualLM <- DemoDxIP_LASSOa$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE 
+```{r}
+#GLM model 
+mean((cv_preds$Lrnr_glm_TRUE - DemoDxIP_LASSOa$InpDay17Capita[tst_indx])^2)
+#GLMNET 
+mean((cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE - DemoDxIP_LASSOa$InpDay17Capita[tst_indx])^2)
+```
+
+Remove second order terms and run nonparametric models 
+```{r}
+DemoDxIP_LASSOa<-DemoDxIP_LASSOa[-c(29, 103:107)]
+```
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxIP_LASSOa$InpDay17Capita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxIP_LASSOa)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+IP_Demo_Train <- sl3_Task$new(
+  data = DemoDxIP_LASSOa[-1][trn_indx, ],
+  covariates = colnames(DemoDxIP_LASSOa)[-c(1,101)],
+  outcome = colnames(DemoDxIP_LASSOa)[101],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+IP_Demo_Test <- sl3_Task$new(
+  data = DemoDxIP_LASSOa[-1][tst_indx, ],
+  covariates = colnames(DemoDxIP_LASSOa)[-c(1,101)],
+  outcome = colnames(DemoDxIP_LASSOa)[101],
+  outcome_type = "continuous"
+)
+
+IP_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(rf_learner, gb_learner)
+stack_fit<-learner_stack$train(IP_Demo_Train)
+
+stack_preds<-stack_fit$predict(IP_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(IP_Demo_Train)
+cv_preds<-cv_fit$predict(IP_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE
+actualLM <- DemoDxIP_LASSOa$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_gbm_10000_2_0.001
+actualLM <- DemoDxIP_LASSOa$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE
+```{r}
+#Random Forest 
+mean((cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE - DemoDxIP_LASSOa$InpDay17Capita[tst_indx])^2)
+#GBM
+mean((cv_preds$Lrnr_gbm_10000_2_0.001 - DemoDxIP_LASSOa$InpDay17Capita[tst_indx])^2)
+```
+
+###Hospital expenditures w/ features selected from LASSO
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70130)
+trn_indx <- createDataPartition(DemoDxExp_LASSOa$HosExpCapita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxExp_LASSOa)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+Exp_Demo_Train <- sl3_Task$new(
+  data = DemoDxExp_LASSOa[-1][trn_indx, ],
+  covariates = colnames(DemoDxExp_LASSOa)[-c(1, 80)],
+  outcome = colnames(DemoDxExp_LASSOa)[80],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+Exp_Demo_Test <- sl3_Task$new(
+  data = DemoDxExp_LASSOa[-1][tst_indx, ],
+  covariates = colnames(DemoDxExp_LASSOa)[-c(1,80)],
+  outcome = colnames(DemoDxExp_LASSOa)[80],
+  outcome_type = "continuous"
+)
+
+Exp_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(lrnr_glm, glmnet_learner)
+stack_fit<-learner_stack$train(Exp_Demo_Train)
+
+stack_preds<-stack_fit$predict(Exp_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(Exp_Demo_Train)
+cv_preds<-cv_fit$predict(Exp_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_glm_TRUE
+actualLM <- DemoDxIP_LASSOa$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE
+actualLM <- DemoDxIP_LASSOa$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE 
+```{r}
+#GLM model 
+mean((cv_preds$Lrnr_glm_TRUE - DemoDxExp_LASSOa$HosExpCapita[tst_indx])^2)
+#GLMNET 
+mean((cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE - DemoDxExp_LASSOa$HosExpCapita[tst_indx])^2)
+```
+
+Remove second order terms and run nonparametrics models
+```{r}
+DemoDxExp_LASSOa<-DemoDxExp_LASSOa[-c(36, 81:82)]
+```
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxExp_LASSOa$HosExpCapita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxExp_LASSOa)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+Exp_Demo_Train <- sl3_Task$new(
+  data = DemoDxExp_LASSOa[-1][trn_indx, ],
+  covariates = colnames(DemoDxExp_LASSOa)[-c(1, 79)],
+  outcome = colnames(DemoDxExp_LASSOa)[79],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+Exp_Demo_Test <- sl3_Task$new(
+  data = DemoDxExp_LASSOa[-1][tst_indx, ],
+  covariates = colnames(DemoDxExp_LASSOa)[-c(1,79)],
+  outcome = colnames(DemoDxExp_LASSOa)[79],
+  outcome_type = "continuous"
+)
+
+Exp_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(rf_learner, gb_learner)
+stack_fit<-learner_stack$train(Exp_Demo_Train)
+
+stack_preds<-stack_fit$predict(Exp_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(Exp_Demo_Train)
+cv_preds<-cv_fit$predict(Exp_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#RF Model 
+predsLM <- cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE
+actualLM <- DemoDxExp_LASSOa$HosExpCapita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GBM Model 
+predsLM <- cv_preds$Lrnr_gbm_10000_2_0.001
+actualLM <- DemoDxExp_LASSOa$HosExpCapita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE
+```{r}
+#Random Forest 
+mean((cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE - DemoDxExp_LASSOa$HosExpCapita[tst_indx])^2)
+#GBM
+mean((cv_preds$Lrnr_gbm_10000_2_0.001 - DemoDxExp_LASSOa$HosExpCapita[tst_indx])^2)
+```
+
+## Iteration 2d: Disease/health status variables and community characteristics selected from Random Forest feature selection
+
+###ER visits w/ features selected from random forest 
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxER_RF$TotER17Capita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxER_RF)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+ER_Demo_Train <- sl3_Task$new(
+  data = DemoDxER_RF[-1][trn_indx, ],
+  covariates = colnames(DemoDxER_RF)[-c(1,31)],
+  outcome = colnames(DemoDxER_RF)[31],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+ER_Demo_Test <- sl3_Task$new(
+  data = DemoDxER_RF[-1][tst_indx, ],
+  covariates = colnames(DemoDxER_RF)[-c(1, 31)],
+  outcome = colnames(DemoDxER_RF)[31],
+  outcome_type = "continuous"
+)
+
+ER_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(lrnr_glm, glmnet_learner, rf_learner, gb_learner)
+stack_fit<-learner_stack$train(ER_Demo_Train)
+
+stack_preds<-stack_fit$predict(ER_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(ER_Demo_Train)
+cv_preds<-cv_fit$predict(ER_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_glm_TRUE
+actualLM <- DemoDxER_RF$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE
+actualLM <- DemoDxER_RF$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#RF Model 
+predsLM <- cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE
+actualLM <- DemoDxER_RF$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GBM Model 
+predsLM <- cv_preds$Lrnr_gbm_10000_2_0.001
+actualLM <- DemoDxER_RF$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+
+Calculate MSE 
+```{r}
+#GLM model 
+mean((cv_preds$Lrnr_glm_TRUE - DemoDxER_RF$TotER17Capita[tst_indx])^2)
+#GLMNET 
+mean((cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE - DemoDxER_RF$TotER17Capita[tst_indx])^2)
+#Random Forest 
+mean((cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE - DemoDxER_RF$TotER17Capita[tst_indx])^2)
+#GBM
+mean((cv_preds$Lrnr_gbm_10000_2_0.001 - DemoDxER_RF$TotER17Capita[tst_indx])^2)
+```
+
+###IP Days w/ features selected from random forest 
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxIP_RF$InpDay17Capita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxIP_RF)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+IP_Demo_Train <- sl3_Task$new(
+  data = DemoDxIP_RF[-1][trn_indx, ],
+  covariates = colnames(DemoDxIP_RF)[-c(1, 30)],
+  outcome = colnames(DemoDxIP_RF)[30],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+IP_Demo_Test <- sl3_Task$new(
+  data = DemoDxIP_RF[-1][tst_indx, ],
+  covariates = colnames(DemoDxIP_RF)[-c(1, 30)],
+  outcome = colnames(DemoDxIP_RF)[30],
+  outcome_type = "continuous"
+)
+
+IP_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(lrnr_glm, glmnet_learner, rf_learner, gb_learner)
+stack_fit<-learner_stack$train(IP_Demo_Train)
+
+stack_preds<-stack_fit$predict(IP_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(IP_Demo_Train)
+cv_preds<-cv_fit$predict(IP_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_glm_TRUE
+actualLM <- DemoDxIP_RF$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE
+actualLM <- DemoDxIP_RF$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#RF Model 
+predsLM <- cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE
+actualLM <- DemoDxIP_RF$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GBM Model 
+predsLM <- cv_preds$Lrnr_gbm_10000_2_0.001
+actualLM <- DemoDxIP_RF$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE 
+```{r}
+#GLM model 
+mean((cv_preds$Lrnr_glm_TRUE - DemoDxIP_RF$InpDay17Capita[tst_indx])^2)
+#GLMNET 
+mean((cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE - DemoDxIP_RF$InpDay17Capita[tst_indx])^2)
+#Random Forest 
+mean((cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE - DemoDxIP_RF$InpDay17Capita[tst_indx])^2)
+#GBM
+mean((cv_preds$Lrnr_gbm_10000_2_0.001 - DemoDxIP_RF$InpDay17Capita[tst_indx])^2)
+```
+
+###Hospital expenditures w/ features selected from random forest 
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxExp_RF$HosExpCapita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxExp_RF)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+Exp_Demo_Train <- sl3_Task$new(
+  data = DemoDxExp_RF[-1][trn_indx, ],
+  covariates = colnames(DemoDxExp_RF)[-c(1, 31)],
+  outcome = colnames(DemoDxExp_RF)[31],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+Exp_Demo_Test <- sl3_Task$new(
+  data = DemoDxExp_RF[-1][tst_indx, ],
+  covariates = colnames(DemoDxExp_RF)[-c(1, 31)],
+  outcome = colnames(DemoDxExp_RF)[31],
+  outcome_type = "continuous"
+)
+
+Exp_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(lrnr_glm, glmnet_learner, rf_learner, gb_learner)
+stack_fit<-learner_stack$train(Exp_Demo_Train)
+
+stack_preds<-stack_fit$predict(Exp_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(Exp_Demo_Train)
+cv_preds<-cv_fit$predict(Exp_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_glm_TRUE
+actualLM <- DemoDxExp_RF$HosExpCapita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE
+actualLM <- DemoDxExp_RF$HosExpCapita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#RF Model 
+predsLM <- cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE
+actualLM <- DemoDxExp_RF$HosExpCapita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GBM Model 
+predsLM <- cv_preds$Lrnr_gbm_10000_2_0.001
+actualLM <- DemoDxExp_RF$HosExpCapita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE 
+```{r}
+#GLM model 
+mean((cv_preds$Lrnr_glm_TRUE - DemoDxExp_RF$HosExpCapita[tst_indx])^2)
+#GLMNET 
+mean((cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE - DemoDxExp_RF$HosExpCapita[tst_indx])^2)
+#Random Forest 
+mean((cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE - DemoDxExp_RF$HosExpCapita[tst_indx])^2)
+#GBM
+mean((cv_preds$Lrnr_gbm_10000_2_0.001 - DemoDxExp_RF$HosExpCapita[tst_indx])^2)
+```
+
+
+##Iteration 2e: Disease/health variables and consumer expenditures variables 
+```{r}
+#adult & child disease and health status (original)
+load(file="~/County/CandidateExposures/DxHealthER_12.15a.Rda")
+load(file="~/County/CandidateExposures/DxHealthIP_12.15a.Rda")
+load(file="~/County/CandidateExposures/DxHealthExp_12.15a.Rda")
+
+#consumer expenditures original
+load(file="~/County/CandidateExposures/ConsER_12.15a.Rda")
+load(file="~/County/CandidateExposures/ConsIP_12.15a.Rda")
+load(file="~/County/CandidateExposures/ConsExp_12.15a.Rda")
+
+#LASSO food, household, and miscellaneous consumer purchases 
+load(file="~/County/Model/ER_Food_Coef_10.07.Rda")
+load(file="~/County/Model/IP_Food_Coef_10.07.Rda")
+load(file="~/County/Model/Exp_Food_Coef_10.07.Rda")
+
+#Random Forest food, household, and miscellaneous consumer purchases 
+load(file="~/County/Model/ER_Food_Var_10.07.Rda")
+load(file="~/County/Model/IP_Food_Var_10.07.Rda")
+load(file="~/County/Model/HosExp_Food_Var_10.07.Rda")
+
+#LASSO disease and health status 
+load(file="~/County/Model/ER_Adult_Coef_10.07.Rda")
+load(file="~/County/Model/IP_Adult_Coef_10.07.Rda")
+load(file="~/County/Model/Exp_Adult_Coef_10.07.Rda")
+
+#Random Forest disease and health status 
+load(file="~/County/Model/ER_Adult_Var_10.07.Rda")
+load(file="~/County/Model/IP_Adult_Var_10.07.Rda")
+load(file="~/County/Model/HosExp_Adult_Var_10.07.Rda")
+```
+
+Merge demographics & consumer expenditure data 
+```{r}
+#ER Visits 
+DemoDxER<-merge(DxHealthER_12.15a, ConsER_12.15a, by="All_Counties")
+#Drop extra outcome generated from merge 
+DemoDxER<-DemoDxER[-c(148)]
+#rename outcome
+names(DemoDxER)[names(DemoDxER)=="TotER17Capita.y"] <- "TotER17Capita"
+
+#IP visits 
+DemoDxIP<-merge(DxHealthIP_12.15a, ConsIP_12.15a, by="All_Counties")
+#Drop extra outcome generated from merge 
+DemoDxIP<-DemoDxIP[-c(148)]
+#rename outcome
+names(DemoDxIP)[names(DemoDxIP)=="InpDay17Capita.y"] <- "InpDay17Capita"
+
+#Hospital expenditures 
+DemoDxExp<-merge(DxHealthExp_12.15a, ConsExp_12.15a, by="All_Counties")
+#Drop extra outcome generated from merge 
+DemoDxExp<-DemoDxExp[-c(148)]
+#rename outcome
+names(DemoDxExp)[names(DemoDxExp)=="HosExpCapita.y"] <- "HosExpCapita"
+```
+
+Subset demographic + disease/health status variables to include only those selected by LASSO models 
+```{r}
+#ER  visits 
+rownames(ER_Adult_Coef_10.07)[rownames(ER_Adult_Coef_10.07) == "X.Intercept."] = "TotER17Capita"
+ER_Adult_Coef_10.07<-rownames(ER_Adult_Coef_10.07)
+rownames(ER_Food_Coef_10.07)[rownames(ER_Food_Coef_10.07) == "X.Intercept."] = "TotER17Capita"
+ER_Food_Coef_10.07<-rownames(ER_Food_Coef_10.07)
+
+#combine coefficient rownames 
+ERDx<-c(ER_Adult_Coef_10.07, ER_Food_Coef_10.07, "All_Counties")
+
+col.num <- which(colnames(DemoDxER) %in% ERDx )
+DemoDxER_LASSOa<-DemoDxER[c(col.num)]
+
+#IP Days 
+rownames(IP_Adult_Coef_10.07)[rownames(IP_Adult_Coef_10.07) == "X.Intercept."] = "InpDay17Capita"
+IP_Adult_Coef_10.07<-rownames(IP_Adult_Coef_10.07)
+rownames(IP_Food_Coef_10.07)[rownames(IP_Food_Coef_10.07) == "X.Intercept."] = "InpDay17Capita"
+IP_Food_Coef_10.07<-rownames(IP_Food_Coef_10.07)
+
+#combine coefficient rownames 
+IPDx<-c(IP_Adult_Coef_10.07, IP_Food_Coef_10.07, "All_Counties")
+
+col.num <- which(colnames(DemoDxIP) %in% IPDx)
+DemoDxIP_LASSOa<-DemoDxIP[c(col.num)]
+
+#Hospital expenditures 
+Exp_Adult_Coef_10.07<-rownames(Exp_Adult_Coef_10.07)
+Exp_Adult_Coef_10.07<-c(Exp_Adult_Coef_10.07, "HosExpCapita")
+Exp_Food_Coef_10.07<-rownames(Exp_Food_Coef_10.07)
+
+ExpDx<-c(Exp_Adult_Coef_10.07, Exp_Food_Coef_10.07, "All_Counties")
+
+col.num <- which(colnames(DemoDxExp) %in% ExpDx)
+DemoDxExp_LASSOa<-DemoDxExp[c(col.num)]
+```
+
+Remove second order terms from DemoDxER
+```{r}
+DemoDxER_noi<-DemoDxER[-c(147:162, 735:791)]
+DemoDxIP_noi<-DemoDxIP[-c(148:162, 735:791)]
+DemoDxExp_noi<-DemoDxExp[-c(148:162, 735:788)]
+```
+
+Subset demographic + disease/health status variables to include only those selected by Random Forest models 
+```{r}
+#ER Visits 
+ER_Adult_Var_10.07<-rownames(ER_Adult_Var_10.07)
+ER_Adult_Var_10.07<-c(ER_Adult_Var_10.07, "TotER17Capita")
+ER_Food_Var_10.07<-rownames(ER_Food_Var_10.07)
+
+ERDx_RF<-c(ER_Adult_Var_10.07, ER_Food_Var_10.07, "All_Counties")
+
+col.num <- which(colnames(DemoDxER_noi) %in% ERDx_RF )
+DemoDxER_RF<-DemoDxER_noi[c(col.num)]
+
+#IP Visits 
+IP_Adult_Var_10.07<-rownames(IP_Adult_Var_10.07)
+IP_Adult_Var_10.07<-c(IP_Adult_Var_10.07, "InpDay17Capita")
+IP_Food_Var_10.07<-rownames(IP_Food_Var_10.07)
+
+IPDx_RF<-c(IP_Adult_Var_10.07, IP_Food_Var_10.07, "All_Counties")
+
+col.num <- which(colnames(DemoDxIP_noi) %in% IPDx_RF )
+DemoDxIP_RF<-DemoDxIP_noi[c(col.num)]
+
+#Hospital expenditures 
+HosExp_Adult_Var_10.07<-rownames(HosExp_Adult_Var_10.07)
+HosExp_Adult_Var_10.07<-c(HosExp_Adult_Var_10.07, "HosExpCapita")
+HosExp_Food_Var_10.07<-rownames(HosExp_Food_Var_10.07)
+
+ExpDx_RF<-c(HosExp_Adult_Var_10.07, HosExp_Food_Var_10.07, "All_Counties")
+
+col.num <- which(colnames(DemoDxExp_noi) %in% ExpDx_RF )
+DemoDxExp_RF<-DemoDxExp_noi[c(col.num)]
+
+```
+
+## Iteration 2e. Disease/health variables and consumer expenditure variables selected from LASSO 
+
+###ER visits w/ features selected from LASSO
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxER_LASSOa$TotER17Capita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxER_LASSOa)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+ER_Demo_Train <- sl3_Task$new(
+  data = DemoDxER_LASSOa[-1][trn_indx, ],
+  covariates = colnames(DemoDxER_LASSOa)[-c(1,17)],
+  outcome = colnames(DemoDxER_LASSOa)[17],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+ER_Demo_Test <- sl3_Task$new(
+  data = DemoDxER_LASSOa[-1][tst_indx, ],
+  covariates = colnames(DemoDxER_LASSOa)[-c(1,17)],
+  outcome = colnames(DemoDxER_LASSOa)[17],
+  outcome_type = "continuous"
+)
+
+ER_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(lrnr_glm, glmnet_learner)
+stack_fit<-learner_stack$train(ER_Demo_Train)
+
+stack_preds<-stack_fit$predict(ER_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(ER_Demo_Train)
+cv_preds<-cv_fit$predict(ER_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_glm_TRUE
+actualLM <- DemoDxER_LASSOa$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE
+actualLM <- DemoDxER_LASSOa$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE 
+```{r}
+#GLM model 
+mean((cv_preds$Lrnr_glm_TRUE - DemoDxER_LASSOa$TotER17Capita[tst_indx])^2)
+#GLMNET 
+mean((cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE - DemoDxER_LASSOa$TotER17Capita[tst_indx])^2)
+```
+
+Remove second order terms, will be used to run nonparametric models
+```{r}
+DemoDxER_LASSOa<-DemoDxER_LASSOa[-c(16, 29:31)]
+```
+
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70130)
+trn_indx <- createDataPartition(DemoDxER_LASSOa$TotER17Capita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxER_LASSOa)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+ER_Demo_Train <- sl3_Task$new(
+  data = DemoDxER_LASSOa[-1][trn_indx, ],
+  covariates = colnames(DemoDxER_LASSOa)[-c(1,16)],
+  outcome = colnames(DemoDxER_LASSOa)[16],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+ER_Demo_Test <- sl3_Task$new(
+  data = DemoDxER_LASSOa[-1][tst_indx, ],
+  covariates = colnames(DemoDxER_LASSOa)[-c(1,16)],
+  outcome = colnames(DemoDxER_LASSOa)[16],
+  outcome_type = "continuous"
+)
+
+ER_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(rf_learner, gb_learner)
+stack_fit<-learner_stack$train(ER_Demo_Train)
+
+stack_preds<-stack_fit$predict(ER_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(ER_Demo_Train)
+cv_preds<-cv_fit$predict(ER_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#RF Model 
+predsLM <- cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE
+actualLM <- DemoDxER_LASSOa$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GBM Model 
+predsLM <- cv_preds$Lrnr_gbm_10000_2_0.001
+actualLM <- DemoDxER_LASSOa$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE
+```{r}
+#Random Forest 
+mean((cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE - DemoDxER_LASSOa$TotER17Capita[tst_indx])^2)
+#GBM
+mean((cv_preds$Lrnr_gbm_10000_2_0.001 - DemoDxER_LASSOa$TotER17Capita[tst_indx])^2)
+```
+
+
+###IP Days w/ features selected from LASSO
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxIP_LASSOa$InpDay17Capita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxIP_LASSOa)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+IP_Demo_Train <- sl3_Task$new(
+  data = DemoDxIP_LASSOa[-1][trn_indx, ],
+  covariates = colnames(DemoDxIP_LASSOa)[-c(1,30)],
+  outcome = colnames(DemoDxIP_LASSOa)[30],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+IP_Demo_Test <- sl3_Task$new(
+  data = DemoDxIP_LASSOa[-1][tst_indx, ],
+  covariates = colnames(DemoDxIP_LASSOa)[-c(1,30)],
+  outcome = colnames(DemoDxIP_LASSOa)[30],
+  outcome_type = "continuous"
+)
+
+IP_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(lrnr_glm, glmnet_learner)
+stack_fit<-learner_stack$train(IP_Demo_Train)
+
+stack_preds<-stack_fit$predict(IP_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(IP_Demo_Train)
+cv_preds<-cv_fit$predict(IP_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_glm_TRUE
+actualLM <- DemoDxIP_LASSOa$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE
+actualLM <- DemoDxIP_LASSOa$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+
+Calculate MSE 
+```{r}
+#GLM model 
+mean((cv_preds$Lrnr_glm_TRUE - DemoDxIP_LASSOa$InpDay17Capita[tst_indx])^2)
+#GLMNET 
+mean((cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE - DemoDxIP_LASSOa$InpDay17Capita[tst_indx])^2)
+```
+
+Remove second order terms and run nonparametric models 
+```{r}
+DemoDxIP_LASSOa<-DemoDxIP_LASSOa[-c(29, 85:95)]
+```
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxIP_LASSOa$InpDay17Capita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxIP_LASSOa)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+IP_Demo_Train <- sl3_Task$new(
+  data = DemoDxIP_LASSOa[-1][trn_indx, ],
+  covariates = colnames(DemoDxIP_LASSOa)[-c(1,29)],
+  outcome = colnames(DemoDxIP_LASSOa)[29],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+IP_Demo_Test <- sl3_Task$new(
+  data = DemoDxIP_LASSOa[-1][tst_indx, ],
+  covariates = colnames(DemoDxIP_LASSOa)[-c(1,29)],
+  outcome = colnames(DemoDxIP_LASSOa)[29],
+  outcome_type = "continuous"
+)
+
+IP_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(rf_learner, gb_learner)
+stack_fit<-learner_stack$train(IP_Demo_Train)
+
+stack_preds<-stack_fit$predict(IP_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(IP_Demo_Train)
+cv_preds<-cv_fit$predict(IP_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE
+actualLM <- DemoDxIP_LASSOa$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_gbm_10000_2_0.001
+actualLM <- DemoDxIP_LASSOa$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE
+```{r}
+#Random Forest 
+mean((cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE - DemoDxIP_LASSOa$InpDay17Capita[tst_indx])^2)
+#GBM
+mean((cv_preds$Lrnr_gbm_10000_2_0.001 - DemoDxIP_LASSOa$InpDay17Capita[tst_indx])^2)
+```
+
+###Hospital expenditures w/ features selected from LASSO
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxExp_LASSOa$HosExpCapita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxExp_LASSOa)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+Exp_Demo_Train <- sl3_Task$new(
+  data = DemoDxExp_LASSOa[-1][trn_indx, ],
+  covariates = colnames(DemoDxExp_LASSOa)[-c(1, 37)],
+  outcome = colnames(DemoDxExp_LASSOa)[37],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+Exp_Demo_Test <- sl3_Task$new(
+  data = DemoDxExp_LASSOa[-1][tst_indx, ],
+  covariates = colnames(DemoDxExp_LASSOa)[-c(1,37)],
+  outcome = colnames(DemoDxExp_LASSOa)[37],
+  outcome_type = "continuous"
+)
+
+Exp_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(lrnr_glm, glmnet_learner)
+stack_fit<-learner_stack$train(Exp_Demo_Train)
+
+stack_preds<-stack_fit$predict(Exp_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(Exp_Demo_Train)
+cv_preds<-cv_fit$predict(Exp_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_glm_TRUE
+actualLM <- DemoDxIP_LASSOa$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE
+actualLM <- DemoDxIP_LASSOa$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE 
+```{r}
+#GLM model 
+mean((cv_preds$Lrnr_glm_TRUE - DemoDxExp_LASSOa$HosExpCapita[tst_indx])^2)
+#GLMNET 
+mean((cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE - DemoDxExp_LASSOa$HosExpCapita[tst_indx])^2)
+```
+
+Remove second order terms and run nonparametrics models
+```{r}
+DemoDxExp_LASSOa<-DemoDxExp_LASSOa[-c(36, 87:94)]
+```
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxExp_LASSOa$HosExpCapita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxExp_LASSOa)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+Exp_Demo_Train <- sl3_Task$new(
+  data = DemoDxExp_LASSOa[-1][trn_indx, ],
+  covariates = colnames(DemoDxExp_LASSOa)[-c(1, 36)],
+  outcome = colnames(DemoDxExp_LASSOa)[36],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+Exp_Demo_Test <- sl3_Task$new(
+  data = DemoDxExp_LASSOa[-1][tst_indx, ],
+  covariates = colnames(DemoDxExp_LASSOa)[-c(1,36)],
+  outcome = colnames(DemoDxExp_LASSOa)[36],
+  outcome_type = "continuous"
+)
+
+Exp_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(rf_learner, gb_learner)
+stack_fit<-learner_stack$train(Exp_Demo_Train)
+
+stack_preds<-stack_fit$predict(Exp_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(Exp_Demo_Train)
+cv_preds<-cv_fit$predict(Exp_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#RF Model 
+predsLM <- cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE
+actualLM <- DemoDxExp_LASSOa$HosExpCapita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GBM Model 
+predsLM <- cv_preds$Lrnr_gbm_10000_2_0.001
+actualLM <- DemoDxExp_LASSOa$HosExpCapita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE
+```{r}
+#Random Forest 
+mean((cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE - DemoDxExp_LASSOa$HosExpCapita[tst_indx])^2)
+#GBM
+mean((cv_preds$Lrnr_gbm_10000_2_0.001 - DemoDxExp_LASSOa$HosExpCapita[tst_indx])^2)
+```
+
+
+## Iteration 2e: Disease/health variables and consumer expenditure variables selected from Random Forest feature selection
+
+###ER visits w/ features selected from random forest 
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxER_RF$TotER17Capita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxER_RF)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+ER_Demo_Train <- sl3_Task$new(
+  data = DemoDxER_RF[-1][trn_indx, ],
+  covariates = colnames(DemoDxER_RF)[-c(1,16)],
+  outcome = colnames(DemoDxER_RF)[16],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+ER_Demo_Test <- sl3_Task$new(
+  data = DemoDxER_RF[-1][tst_indx, ],
+  covariates = colnames(DemoDxER_RF)[-c(1, 16)],
+  outcome = colnames(DemoDxER_RF)[16],
+  outcome_type = "continuous"
+)
+
+ER_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(lrnr_glm, glmnet_learner, rf_learner, gb_learner)
+stack_fit<-learner_stack$train(ER_Demo_Train)
+
+stack_preds<-stack_fit$predict(ER_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(ER_Demo_Train)
+cv_preds<-cv_fit$predict(ER_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_glm_TRUE
+actualLM <- DemoDxER_RF$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE
+actualLM <- DemoDxER_RF$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#RF Model 
+predsLM <- cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE
+actualLM <- DemoDxER_RF$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GBM Model 
+predsLM <- cv_preds$Lrnr_gbm_10000_2_0.001
+actualLM <- DemoDxER_RF$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+
+Calculate MSE 
+```{r}
+#GLM model 
+mean((cv_preds$Lrnr_glm_TRUE - DemoDxER_RF$TotER17Capita[tst_indx])^2)
+#GLMNET 
+mean((cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE - DemoDxER_RF$TotER17Capita[tst_indx])^2)
+#Random Forest 
+mean((cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE - DemoDxER_RF$TotER17Capita[tst_indx])^2)
+#GBM
+mean((cv_preds$Lrnr_gbm_10000_2_0.001 - DemoDxER_RF$TotER17Capita[tst_indx])^2)
+```
+
+
+###IP Days w/ features selected from random forest 
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxIP_RF$InpDay17Capita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxIP_RF)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+IP_Demo_Train <- sl3_Task$new(
+  data = DemoDxIP_RF[-1][trn_indx, ],
+  covariates = colnames(DemoDxIP_RF)[-c(1, 17)],
+  outcome = colnames(DemoDxIP_RF)[17],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+IP_Demo_Test <- sl3_Task$new(
+  data = DemoDxIP_RF[-1][tst_indx, ],
+  covariates = colnames(DemoDxIP_RF)[-c(1, 17)],
+  outcome = colnames(DemoDxIP_RF)[17],
+  outcome_type = "continuous"
+)
+
+IP_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(lrnr_glm, glmnet_learner, rf_learner, gb_learner)
+stack_fit<-learner_stack$train(IP_Demo_Train)
+
+stack_preds<-stack_fit$predict(IP_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(IP_Demo_Train)
+cv_preds<-cv_fit$predict(IP_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_glm_TRUE
+actualLM <- DemoDxIP_RF$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE
+actualLM <- DemoDxIP_RF$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#RF Model 
+predsLM <- cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE
+actualLM <- DemoDxIP_RF$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GBM Model 
+predsLM <- cv_preds$Lrnr_gbm_10000_2_0.001
+actualLM <- DemoDxIP_RF$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE 
+```{r}
+#GLM model 
+mean((cv_preds$Lrnr_glm_TRUE - DemoDxIP_RF$InpDay17Capita[tst_indx])^2)
+#GLMNET 
+mean((cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE - DemoDxIP_RF$InpDay17Capita[tst_indx])^2)
+#Random Forest 
+mean((cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE - DemoDxIP_RF$InpDay17Capita[tst_indx])^2)
+#GBM
+mean((cv_preds$Lrnr_gbm_10000_2_0.001 - DemoDxIP_RF$InpDay17Capita[tst_indx])^2)
+```
+
+
+###Hospital expenditures w/ features selected from random forest 
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxExp_RF$HosExpCapita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxExp_RF)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+Exp_Demo_Train <- sl3_Task$new(
+  data = DemoDxExp_RF[-1][trn_indx, ],
+  covariates = colnames(DemoDxExp_RF)[-c(1, 17)],
+  outcome = colnames(DemoDxExp_RF)[17],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+Exp_Demo_Test <- sl3_Task$new(
+  data = DemoDxExp_RF[-1][tst_indx, ],
+  covariates = colnames(DemoDxExp_RF)[-c(1, 17)],
+  outcome = colnames(DemoDxExp_RF)[17],
+  outcome_type = "continuous"
+)
+
+Exp_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(lrnr_glm, glmnet_learner, rf_learner, gb_learner)
+stack_fit<-learner_stack$train(Exp_Demo_Train)
+
+stack_preds<-stack_fit$predict(Exp_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(Exp_Demo_Train)
+cv_preds<-cv_fit$predict(Exp_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_glm_TRUE
+actualLM <- DemoDxExp_RF$HosExpCapita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE
+actualLM <- DemoDxExp_RF$HosExpCapita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#RF Model 
+predsLM <- cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE
+actualLM <- DemoDxExp_RF$HosExpCapita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GBM Model 
+predsLM <- cv_preds$Lrnr_gbm_10000_2_0.001
+actualLM <- DemoDxExp_RF$HosExpCapita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE 
+```{r}
+#GLM model 
+mean((cv_preds$Lrnr_glm_TRUE - DemoDxExp_RF$HosExpCapita[tst_indx])^2)
+#GLMNET 
+mean((cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE - DemoDxExp_RF$HosExpCapita[tst_indx])^2)
+#Random Forest 
+mean((cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE - DemoDxExp_RF$HosExpCapita[tst_indx])^2)
+#GBM
+mean((cv_preds$Lrnr_gbm_10000_2_0.001 - DemoDxExp_RF$HosExpCapita[tst_indx])^2)
+```
+
+
+##Iteration 2f: Community Characteristics  variables and consumer expenditures variables 
+```{r}
+#original data 
+
+#consumer expenditures original
+load(file="~/County/CandidateExposures/ConsER_12.15a.Rda")
+load(file="~/County/CandidateExposures/ConsIP_12.15a.Rda")
+load(file="~/County/CandidateExposures/ConsExp_12.15a.Rda")
+
+#LASSO food, household, and miscellaneous consumer purchases 
+load(file="~/County/Model/ER_Food_Coef_10.07.Rda")
+load(file="~/County/Model/IP_Food_Coef_10.07.Rda")
+load(file="~/County/Model/Exp_Food_Coef_10.07.Rda")
+
+#Random Forest food, household, and miscellaneous consumer purchases 
+load(file="~/County/Model/ER_Food_Var_10.07.Rda")
+load(file="~/County/Model/IP_Food_Var_10.07.Rda")
+load(file="~/County/Model/HosExp_Food_Var_10.07.Rda")
+
+#community characteristics original 
+load(file="~/County/CandidateExposures/CommER_12.15a.Rda")
+load(file="~/County/CandidateExposures/CommIP_12.15a.Rda")
+load(file="~/County/CandidateExposures/CommExp_12.15a.Rda")
+
+#LASSO community characteristic 
+load(file="~/County/Model/ER_Employ_Coef_10.07.Rda")
+load(file="~/County/Model/IP_Employ_Coef_10.07.Rda")
+load(file="~/County/Model/Exp_Employ_Coef_10.07.Rda")
+
+#Random Forest community characteristics
+load(file="~/County/Model/ER_Employ_Var_10.07.Rda")
+load(file="~/County/Model/IP_Employ_Var_10.07.Rda")
+load(file="~/County/Model/HosExp_Employ_Var_10.07.Rda")
+```
+
+
+Merge demographics & consumer expenditure data 
+```{r}
+#ER Visits 
+DemoDxER<-merge(CommER_12.15a, ConsER_12.15a, by="All_Counties")
+#Drop extra outcome generated from merge 
+DemoDxER<-DemoDxER[-c(153)]
+#rename outcome
+names(DemoDxER)[names(DemoDxER)=="TotER17Capita.y"] <- "TotER17Capita"
+
+#IP visits 
+DemoDxIP<-merge(CommIP_12.15a, ConsIP_12.15a, by="All_Counties")
+#Drop extra outcome generated from merge 
+DemoDxIP<-DemoDxIP[-c(153)]
+#rename outcome
+names(DemoDxIP)[names(DemoDxIP)=="InpDay17Capita.y"] <- "InpDay17Capita"
+
+#Hospital expenditures 
+DemoDxExp<-merge(CommExp_12.15a, ConsExp_12.15a, by="All_Counties")
+#Drop extra outcome generated from merge 
+DemoDxExp<-DemoDxExp[-c(153)]
+#rename outcome
+names(DemoDxExp)[names(DemoDxExp)=="HosExpCapita.y"] <- "HosExpCapita"
+```
+
+Subset demographic + disease/health status variables to include only those selected by LASSO models 
+```{r}
+#ER  visits 
+rownames(ER_Employ_Coef_10.07)[rownames(ER_Employ_Coef_10.07) == "X.Intercept."] = "TotER17Capita"
+ER_Employ_Coef_10.07<-rownames(ER_Employ_Coef_10.07)
+rownames(ER_Food_Coef_10.07)[rownames(ER_Food_Coef_10.07) == "X.Intercept."] = "TotER17Capita"
+ER_Food_Coef_10.07<-rownames(ER_Food_Coef_10.07)
+
+#combine coefficient rownames 
+ERDx<-c(ER_Employ_Coef_10.07, ER_Food_Coef_10.07, "All_Counties")
+
+col.num <- which(colnames(DemoDxER) %in% ERDx )
+DemoDxER_LASSOa<-DemoDxER[c(col.num)]
+
+#IP Days 
+rownames(IP_Employ_Coef_10.07)[rownames(IP_Employ_Coef_10.07) == "X.Intercept."] = "InpDay17Capita"
+IP_Employ_Coef_10.07<-rownames(IP_Employ_Coef_10.07)
+rownames(IP_Food_Coef_10.07)[rownames(IP_Food_Coef_10.07) == "X.Intercept."] = "InpDay17Capita"
+IP_Food_Coef_10.07<-rownames(IP_Food_Coef_10.07)
+
+#combine coefficient rownames 
+IPDx<-c(IP_Employ_Coef_10.07, IP_Food_Coef_10.07, "All_Counties")
+
+col.num <- which(colnames(DemoDxIP) %in% IPDx)
+DemoDxIP_LASSOa<-DemoDxIP[c(col.num)]
+
+#Hospital expenditures 
+Exp_Employ_Coef_10.07<-rownames(Exp_Employ_Coef_10.07)
+Exp_Employ_Coef_10.07<-c(Exp_Employ_Coef_10.07, "HosExpCapita")
+Exp_Food_Coef_10.07<-rownames(Exp_Food_Coef_10.07)
+
+ExpDx<-c(Exp_Employ_Coef_10.07, Exp_Food_Coef_10.07, "All_Counties")
+
+col.num <- which(colnames(DemoDxExp) %in% ExpDx)
+DemoDxExp_LASSOa<-DemoDxExp[c(col.num)]
+```
+
+Remove second order terms from DemoDxER
+```{r}
+DemoDxER_noi<-DemoDxER[-c(154:167, 740:796)]
+DemoDxIP_noi<-DemoDxIP[-c(153:168, 742:797)]
+DemoDxExp_noi<-DemoDxExp[-c(153:167, 759:793)]
+```
+
+Subset demographic + disease/health status variables to include only those selected by Random Forest models 
+```{r}
+#ER Visits 
+ER_Employ_Var_10.07<-rownames(ER_Employ_Var_10.07)
+ER_Employ_Var_10.07<-c(ER_Employ_Var_10.07, "TotER17Capita")
+ER_Food_Var_10.07<-rownames(ER_Food_Var_10.07)
+
+ERDx_RF<-c(ER_Employ_Var_10.07, ER_Food_Var_10.07, "All_Counties")
+
+col.num <- which(colnames(DemoDxER_noi) %in% ERDx_RF )
+DemoDxER_RF<-DemoDxER_noi[c(col.num)]
+
+#IP Visits 
+IP_Employ_Var_10.07<-rownames(IP_Employ_Var_10.07)
+IP_Employ_Var_10.07<-c(IP_Employ_Var_10.07, "InpDay17Capita")
+IP_Food_Var_10.07<-rownames(IP_Food_Var_10.07)
+
+IPDx_RF<-c(IP_Employ_Var_10.07, IP_Food_Var_10.07, "All_Counties")
+
+col.num <- which(colnames(DemoDxIP_noi) %in% IPDx_RF )
+DemoDxIP_RF<-DemoDxIP_noi[c(col.num)]
+
+#Hospital expenditures 
+HosExp_Employ_Var_10.07<-rownames(HosExp_Employ_Var_10.07)
+HosExp_Employ_Var_10.07<-c(HosExp_Employ_Var_10.07, "HosExpCapita")
+HosExp_Food_Var_10.07<-rownames(HosExp_Food_Var_10.07)
+
+ExpDx_RF<-c(HosExp_Employ_Var_10.07, HosExp_Food_Var_10.07, "All_Counties")
+
+col.num <- which(colnames(DemoDxExp_noi) %in% ExpDx_RF )
+DemoDxExp_RF<-DemoDxExp_noi[c(col.num)]
+
+```
+
+
+##Iteration 2f. Community and consumer expenditure variables selected from LASSO 
+
+###ER visits w/ features selected from LASSO
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxER_LASSOa$TotER17Capita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxER_LASSOa)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+ER_Demo_Train <- sl3_Task$new(
+  data = DemoDxER_LASSOa[-1][trn_indx, ],
+  covariates = colnames(DemoDxER_LASSOa)[-c(1,90)],
+  outcome = colnames(DemoDxER_LASSOa)[90],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+ER_Demo_Test <- sl3_Task$new(
+  data = DemoDxER_LASSOa[-1][tst_indx, ],
+  covariates = colnames(DemoDxER_LASSOa)[-c(1,90)],
+  outcome = colnames(DemoDxER_LASSOa)[90],
+  outcome_type = "continuous"
+)
+
+ER_Demo_Train
+```
+
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(lrnr_glm, glmnet_learner)
+stack_fit<-learner_stack$train(ER_Demo_Train)
+
+stack_preds<-stack_fit$predict(ER_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(ER_Demo_Train)
+cv_preds<-cv_fit$predict(ER_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_glm_TRUE
+actualLM <- DemoDxER_LASSOa$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE
+actualLM <- DemoDxER_LASSOa$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE 
+```{r}
+#GLM model 
+mean((cv_preds$Lrnr_glm_TRUE - DemoDxER_LASSOa$TotER17Capita[tst_indx])^2)
+#GLMNET 
+mean((cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE - DemoDxER_LASSOa$TotER17Capita[tst_indx])^2)
+```
+
+Remove second order terms, will be used to run nonparametric models
+```{r}
+DemoDxER_LASSOa<-DemoDxER_LASSOa[-c(86:88, 103:104)]
+```
+
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxER_LASSOa$TotER17Capita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxER_LASSOa)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+ER_Demo_Train <- sl3_Task$new(
+  data = DemoDxER_LASSOa[-1][trn_indx, ],
+  covariates = colnames(DemoDxER_LASSOa)[-c(1,87)],
+  outcome = colnames(DemoDxER_LASSOa)[87],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+ER_Demo_Test <- sl3_Task$new(
+  data = DemoDxER_LASSOa[-1][tst_indx, ],
+  covariates = colnames(DemoDxER_LASSOa)[-c(1,87)],
+  outcome = colnames(DemoDxER_LASSOa)[87],
+  outcome_type = "continuous"
+)
+
+ER_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(rf_learner, gb_learner)
+stack_fit<-learner_stack$train(ER_Demo_Train)
+
+stack_preds<-stack_fit$predict(ER_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(ER_Demo_Train)
+cv_preds<-cv_fit$predict(ER_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#RF Model 
+predsLM <- cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE
+actualLM <- DemoDxER_LASSOa$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GBM Model 
+predsLM <- cv_preds$Lrnr_gbm_10000_2_0.001
+actualLM <- DemoDxER_LASSOa$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE
+```{r}
+#Random Forest 
+mean((cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE - DemoDxER_LASSOa$TotER17Capita[tst_indx])^2)
+#GBM
+mean((cv_preds$Lrnr_gbm_10000_2_0.001 - DemoDxER_LASSOa$TotER17Capita[tst_indx])^2)
+```
+
+###IP Days w/ features selected from LASSO
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxIP_LASSOa$InpDay17Capita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxIP_LASSOa)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+IP_Demo_Train <- sl3_Task$new(
+  data = DemoDxIP_LASSOa[-1][trn_indx, ],
+  covariates = colnames(DemoDxIP_LASSOa)[-c(1,79)],
+  outcome = colnames(DemoDxIP_LASSOa)[79],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+IP_Demo_Test <- sl3_Task$new(
+  data = DemoDxIP_LASSOa[-1][tst_indx, ],
+  covariates = colnames(DemoDxIP_LASSOa)[-c(1,79)],
+  outcome = colnames(DemoDxIP_LASSOa)[79],
+  outcome_type = "continuous"
+)
+
+IP_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(lrnr_glm, glmnet_learner)
+stack_fit<-learner_stack$train(IP_Demo_Train)
+
+stack_preds<-stack_fit$predict(IP_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(IP_Demo_Train)
+cv_preds<-cv_fit$predict(IP_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_glm_TRUE
+actualLM <- DemoDxIP_LASSOa$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE
+actualLM <- DemoDxIP_LASSOa$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+
+Calculate MSE 
+```{r}
+#GLM model 
+mean((cv_preds$Lrnr_glm_TRUE - DemoDxIP_LASSOa$InpDay17Capita[tst_indx])^2)
+#GLMNET 
+mean((cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE - DemoDxIP_LASSOa$InpDay17Capita[tst_indx])^2)
+```
+
+Remove second order terms and run nonparametric models 
+```{r}
+DemoDxIP_LASSOa<-DemoDxIP_LASSOa[-c(74:78, 134:144)]
+```
+
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxIP_LASSOa$InpDay17Capita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxIP_LASSOa)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+IP_Demo_Train <- sl3_Task$new(
+  data = DemoDxIP_LASSOa[-1][trn_indx, ],
+  covariates = colnames(DemoDxIP_LASSOa)[-c(1,74)],
+  outcome = colnames(DemoDxIP_LASSOa)[74],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+IP_Demo_Test <- sl3_Task$new(
+  data = DemoDxIP_LASSOa[-1][tst_indx, ],
+  covariates = colnames(DemoDxIP_LASSOa)[-c(1,74)],
+  outcome = colnames(DemoDxIP_LASSOa)[74],
+  outcome_type = "continuous"
+)
+
+IP_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(rf_learner, gb_learner)
+stack_fit<-learner_stack$train(IP_Demo_Train)
+
+stack_preds<-stack_fit$predict(IP_Demo_Test)
+head(stack_preds)
+```
+
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(IP_Demo_Train)
+cv_preds<-cv_fit$predict(IP_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE
+actualLM <- DemoDxIP_LASSOa$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_gbm_10000_2_0.001
+actualLM <- DemoDxIP_LASSOa$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE
+```{r}
+#Random Forest 
+mean((cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE - DemoDxIP_LASSOa$InpDay17Capita[tst_indx])^2)
+#GBM
+mean((cv_preds$Lrnr_gbm_10000_2_0.001 - DemoDxIP_LASSOa$InpDay17Capita[tst_indx])^2)
+```
+
+###Hospital expenditures w/ features selected from LASSO
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxExp_LASSOa$HosExpCapita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxExp_LASSOa)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+Exp_Demo_Train <- sl3_Task$new(
+  data = DemoDxExp_LASSOa[-1][trn_indx, ],
+  covariates = colnames(DemoDxExp_LASSOa)[-c(1, 47)],
+  outcome = colnames(DemoDxExp_LASSOa)[47],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+Exp_Demo_Test <- sl3_Task$new(
+  data = DemoDxExp_LASSOa[-1][tst_indx, ],
+  covariates = colnames(DemoDxExp_LASSOa)[-c(1,47)],
+  outcome = colnames(DemoDxExp_LASSOa)[47],
+  outcome_type = "continuous"
+)
+
+Exp_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(lrnr_glm, glmnet_learner)
+stack_fit<-learner_stack$train(Exp_Demo_Train)
+
+stack_preds<-stack_fit$predict(Exp_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(Exp_Demo_Train)
+cv_preds<-cv_fit$predict(Exp_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_glm_TRUE
+actualLM <- DemoDxIP_LASSOa$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE
+actualLM <- DemoDxIP_LASSOa$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE 
+```{r}
+#GLM model 
+mean((cv_preds$Lrnr_glm_TRUE - DemoDxExp_LASSOa$HosExpCapita[tst_indx])^2)
+#GLMNET 
+mean((cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE - DemoDxExp_LASSOa$HosExpCapita[tst_indx])^2)
+```
+
+Remove second order terms and run nonparametrics models
+```{r}
+DemoDxExp_LASSOa<-DemoDxExp_LASSOa[-c(45, 46, 97:104)]
+```
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxExp_LASSOa$HosExpCapita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxExp_LASSOa)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+Exp_Demo_Train <- sl3_Task$new(
+  data = DemoDxExp_LASSOa[-1][trn_indx, ],
+  covariates = colnames(DemoDxExp_LASSOa)[-c(1, 45)],
+  outcome = colnames(DemoDxExp_LASSOa)[45],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+Exp_Demo_Test <- sl3_Task$new(
+  data = DemoDxExp_LASSOa[-1][tst_indx, ],
+  covariates = colnames(DemoDxExp_LASSOa)[-c(1,45)],
+  outcome = colnames(DemoDxExp_LASSOa)[45],
+  outcome_type = "continuous"
+)
+
+Exp_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(rf_learner, gb_learner)
+stack_fit<-learner_stack$train(Exp_Demo_Train)
+
+stack_preds<-stack_fit$predict(Exp_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(Exp_Demo_Train)
+cv_preds<-cv_fit$predict(Exp_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#RF Model 
+predsLM <- cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE
+actualLM <- DemoDxExp_LASSOa$HosExpCapita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GBM Model 
+predsLM <- cv_preds$Lrnr_gbm_10000_2_0.001
+actualLM <- DemoDxExp_LASSOa$HosExpCapita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE
+```{r}
+#Random Forest 
+mean((cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE - DemoDxExp_LASSOa$HosExpCapita[tst_indx])^2)
+#GBM
+mean((cv_preds$Lrnr_gbm_10000_2_0.001 - DemoDxExp_LASSOa$HosExpCapita[tst_indx])^2)
+```
+
+
+## Iteration 2f: Disease/health variables and consumer expenditure variables selected from Random Forest feature selection
+
+###ER visits w/ features selected from random forest 
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxER_RF$TotER17Capita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxER_RF)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+ER_Demo_Train <- sl3_Task$new(
+  data = DemoDxER_RF[-1][trn_indx, ],
+  covariates = colnames(DemoDxER_RF)[-c(1,17)],
+  outcome = colnames(DemoDxER_RF)[17],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+ER_Demo_Test <- sl3_Task$new(
+  data = DemoDxER_RF[-1][tst_indx, ],
+  covariates = colnames(DemoDxER_RF)[-c(1, 17)],
+  outcome = colnames(DemoDxER_RF)[17],
+  outcome_type = "continuous"
+)
+
+ER_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(lrnr_glm, glmnet_learner, rf_learner, gb_learner)
+stack_fit<-learner_stack$train(ER_Demo_Train)
+
+stack_preds<-stack_fit$predict(ER_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(ER_Demo_Train)
+cv_preds<-cv_fit$predict(ER_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_glm_TRUE
+actualLM <- DemoDxER_RF$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE
+actualLM <- DemoDxER_RF$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#RF Model 
+predsLM <- cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE
+actualLM <- DemoDxER_RF$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GBM Model 
+predsLM <- cv_preds$Lrnr_gbm_10000_2_0.001
+actualLM <- DemoDxER_RF$TotER17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+
+Calculate MSE 
+```{r}
+#GLM model 
+mean((cv_preds$Lrnr_glm_TRUE - DemoDxER_RF$TotER17Capita[tst_indx])^2)
+#GLMNET 
+mean((cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE - DemoDxER_RF$TotER17Capita[tst_indx])^2)
+#Random Forest 
+mean((cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE - DemoDxER_RF$TotER17Capita[tst_indx])^2)
+#GBM
+mean((cv_preds$Lrnr_gbm_10000_2_0.001 - DemoDxER_RF$TotER17Capita[tst_indx])^2)
+```
+
+
+###IP Days w/ features selected from random forest 
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxIP_RF$InpDay17Capita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxIP_RF)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+IP_Demo_Train <- sl3_Task$new(
+  data = DemoDxIP_RF[-1][trn_indx, ],
+  covariates = colnames(DemoDxIP_RF)[-c(1, 17)],
+  outcome = colnames(DemoDxIP_RF)[17],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+IP_Demo_Test <- sl3_Task$new(
+  data = DemoDxIP_RF[-1][tst_indx, ],
+  covariates = colnames(DemoDxIP_RF)[-c(1, 17)],
+  outcome = colnames(DemoDxIP_RF)[17],
+  outcome_type = "continuous"
+)
+
+IP_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(lrnr_glm, glmnet_learner, rf_learner, gb_learner)
+stack_fit<-learner_stack$train(IP_Demo_Train)
+
+stack_preds<-stack_fit$predict(IP_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(IP_Demo_Train)
+cv_preds<-cv_fit$predict(IP_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_glm_TRUE
+actualLM <- DemoDxIP_RF$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE
+actualLM <- DemoDxIP_RF$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#RF Model 
+predsLM <- cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE
+actualLM <- DemoDxIP_RF$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GBM Model 
+predsLM <- cv_preds$Lrnr_gbm_10000_2_0.001
+actualLM <- DemoDxIP_RF$InpDay17Capita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE 
+```{r}
+#GLM model 
+mean((cv_preds$Lrnr_glm_TRUE - DemoDxIP_RF$InpDay17Capita[tst_indx])^2)
+#GLMNET 
+mean((cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE - DemoDxIP_RF$InpDay17Capita[tst_indx])^2)
+#Random Forest 
+mean((cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE - DemoDxIP_RF$InpDay17Capita[tst_indx])^2)
+#GBM
+mean((cv_preds$Lrnr_gbm_10000_2_0.001 - DemoDxIP_RF$InpDay17Capita[tst_indx])^2)
+```
+
+
+###Hospital expenditures w/ features selected from random forest 
+
+Separate into train and test sets with a 0.80/0.20 split ratio. 
+```{r}
+set.seed(70119)
+trn_indx <- createDataPartition(DemoDxExp_RF$HosExpCapita, p = .8, list = FALSE,
+                                times = 1) %>%
+  as.numeric()
+tst_indx <- which(!(seq_len(nrow(DemoDxExp_RF)) %in% trn_indx))
+```
+
+Define covariates & generate tasks for train and test sets 
+```{r}
+#task with data from training split 
+Exp_Demo_Train <- sl3_Task$new(
+  data = DemoDxExp_RF[-1][trn_indx, ],
+  covariates = colnames(DemoDxExp_RF)[-c(1, 17)],
+  outcome = colnames(DemoDxExp_RF)[17],
+  outcome_type = "continuous"
+)
+
+# a task with the data from the testing split
+Exp_Demo_Test <- sl3_Task$new(
+  data = DemoDxExp_RF[-1][tst_indx, ],
+  covariates = colnames(DemoDxExp_RF)[-c(1, 17)],
+  outcome = colnames(DemoDxExp_RF)[17],
+  outcome_type = "continuous"
+)
+
+Exp_Demo_Train
+```
+
+Stack learners into a model 
+```{r}
+learner_stack<-Stack$new(lrnr_glm, glmnet_learner, rf_learner, gb_learner)
+stack_fit<-learner_stack$train(Exp_Demo_Train)
+
+stack_preds<-stack_fit$predict(Exp_Demo_Test)
+head(stack_preds)
+```
+
+Cross validation 
+```{r}
+cv_stack<-Lrnr_cv$new(learner_stack)
+cv_fit<-cv_stack$train(Exp_Demo_Train)
+cv_preds<-cv_fit$predict(Exp_Demo_Test)
+head(cv_preds)
+```
+
+Evaluate cross-validated risk values 
+```{r}
+risks<-cv_fit$cv_risk(loss_squared_error)
+print(risks)
+```
+
+Calculate R2
+```{r}
+#LM Model 
+predsLM <- cv_preds$Lrnr_glm_TRUE
+actualLM <- DemoDxExp_RF$HosExpCapita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GLMNET Model 
+predsLM <- cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE
+actualLM <- DemoDxExp_RF$HosExpCapita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#RF Model 
+predsLM <- cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE
+actualLM <- DemoDxExp_RF$HosExpCapita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+
+#GBM Model 
+predsLM <- cv_preds$Lrnr_gbm_10000_2_0.001
+actualLM <- DemoDxExp_RF$HosExpCapita[tst_indx]
+rssLM <- sum((predsLM - actualLM) ^ 2)
+tssLM <- sum((actualLM - mean(actualLM)) ^ 2)
+(rsqLM <- 1 - rssLM/tssLM)
+```
+
+Calculate MSE 
+```{r}
+#GLM model 
+mean((cv_preds$Lrnr_glm_TRUE - DemoDxExp_RF$HosExpCapita[tst_indx])^2)
+#GLMNET 
+mean((cv_preds$Lrnr_glmnet_NULL_deviance_10_1_100_TRUE - DemoDxExp_RF$HosExpCapita[tst_indx])^2)
+#Random Forest 
+mean((cv_preds$Lrnr_randomForest_100_TRUE_5_NULL_FALSE - DemoDxExp_RF$HosExpCapita[tst_indx])^2)
+#GBM
+mean((cv_preds$Lrnr_gbm_10000_2_0.001 - DemoDxExp_RF$HosExpCapita[tst_indx])^2)
+```
