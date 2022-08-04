@@ -1,0 +1,44 @@
+---
+title: "County Modelling"
+author: "Iben M. Ricket"
+date: "9/7/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#County Modelling Part 5: Post model evaluation
+
+Best performing models were identified in a systematic capacity using MSE. The best performing models, for each outcome-metric, were from iteration 4, used random forest as the feature selection technique, and utilized a non-parametric machine learning algorithm. The best performing models for each outcome metric were as follows: 
+
+(1) ER: Random Forest (MSE: 0.003, R2: 0.279)
+(2) Inpatient days: Gradient Boosting Machines (MSE: 0.009, R2: 0.267)
+(3) Hospital expenditures (MSE: 0.003, R2: 0.447)
+
+Best performing models were used in several post model evaluation exercises. 
+
+Libraries needed to support analysis 
+```{r message=FALSE, warning=FALSE}
+library(healthcareai)
+library(dplyr)
+library(glmnet)
+library(pROC)
+library(caret)
+library(ROCR)
+library(generalhoslem)
+library(ResourceSelection)
+library(PredictABEL)
+library(ROCR)
+library(SDMTools)
+library(randomForest)
+library(arsenal)
+library(sqldf)
+library(tidyverse)
+library(DAAG)
+library(sl3)
+library(gridExtra)
+```
+
+
